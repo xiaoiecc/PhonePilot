@@ -20,7 +20,11 @@ data class ComputerResponse(
     val inputTokens: Int? = null,
     val outputTokens: Int? = null,
     val cachedInputTokens: Int? = null,
+    val hostedCalls: List<HostedToolCall> = emptyList(),
 )
+
+/** Server-executed observations only; never local commands or function-call outputs. */
+data class HostedToolCall(val id: String, val type: String, val status: String, val arguments: String, val result: String)
 
 data class ComputerFunctionCall(val callId: String, val name: String, val arguments: JsonObject)
 
@@ -160,6 +164,11 @@ object ComputerProtocol {
                     })
                 }))
                 legacyFunctionTools().forEach { add(withCommentary(it)) }
+                add(buildJsonObject { put("type", "web_search") })
+                add(buildJsonObject {
+                    put("type", "code_interpreter")
+                    put("container", buildJsonObject { put("type", "auto") })
+                })
             })
             put("parallel_tool_calls", false)
             put("reasoning", buildJsonObject { put("effort", config.reasoningEffort) })
@@ -189,12 +198,21 @@ object ComputerProtocol {
         val calls = mutableListOf<ComputerCall>()
         val functionCalls = mutableListOf<ComputerFunctionCall>()
         val outputOrder = mutableListOf<String>()
+        val hostedCalls = mutableListOf<HostedToolCall>()
         val text = mutableListOf<String>()
         var hasFinalMessage = false
         for (element in output) {
             val item = element as? JsonObject ?: throw ComputerProtocolException("Invalid output item")
             when (item.requiredString("type")) {
                 "reasoning" -> Unit
+                "web_search_call", "code_interpreter_call" -> {
+                    val toolId = item.requiredString("id")
+                    val status = item.requiredString("status")
+                    if (status !in setOf("completed", "failed", "incomplete") || hostedCalls.any { it.id == toolId }) {
+                        throw ComputerProtocolException("Invalid hosted tool result")
+                    }
+                    hostedCalls += HostedResponseFormatting.trace(item, toolId, status)
+                }
                 "computer_call" -> {
                     if (item.string("status") != "completed") {
                         throw ComputerProtocolException("Incomplete computer call")
@@ -238,7 +256,7 @@ object ComputerProtocol {
                     }
                     item.objects("content").forEach { content ->
                         when (content.requiredString("type")) {
-                            "output_text" -> text.add(content.requiredString("text"))
+                            "output_text" -> text.add(HostedResponseFormatting.text(content))
                             "refusal" -> throw ComputerProtocolException("The model declined this task")
                             else -> throw ComputerProtocolException("Unsupported message content")
                         }
@@ -247,7 +265,8 @@ object ComputerProtocol {
                 else -> throw ComputerProtocolException("Unsupported Responses output item")
             }
         }
-        if (calls.isEmpty() && functionCalls.isEmpty() && (text.isEmpty() || !hasFinalMessage)) {
+        if (hostedCalls.any { it.id in outputOrder }) throw ComputerProtocolException("Duplicate tool call ID")
+        if (hostedCalls.isEmpty() && calls.isEmpty() && functionCalls.isEmpty() && (text.isEmpty() || !hasFinalMessage)) {
             throw ComputerProtocolException("Responses returned no action or answer")
         }
         val usage = root["usage"] as? JsonObject
@@ -255,7 +274,8 @@ object ComputerProtocol {
         return ComputerResponse(id, calls, text.joinToString("\n"), functionCalls, outputOrder,
             inputTokens = (usage?.get("input_tokens") as? JsonPrimitive)?.intOrNull,
             outputTokens = (usage?.get("output_tokens") as? JsonPrimitive)?.intOrNull,
-            cachedInputTokens = (details?.get("cached_tokens") as? JsonPrimitive)?.intOrNull)
+            cachedInputTokens = (details?.get("cached_tokens") as? JsonPrimitive)?.intOrNull,
+            hostedCalls = hostedCalls.toList())
     }
 
     private fun validateFunction(name: String, supplied: JsonObject) {
@@ -588,6 +608,7 @@ object ComputerProtocol {
 
     private const val INSTRUCTIONS =
         "You operate an Android phone. Choose the least costly reliable observation and action, not a fixed modality. " +
+            "Use built-in web_search for web information and the python/code_interpreter tool for computation when useful. Both run on OpenAI servers; Python has no direct access to this phone or its files. Use Android tools for phone actions. Preserve web citations in your answer. " +
             "Start with the supplied accessibility observation. When labels, values and supported node actions clearly identify the target, prefer android_ui; no screenshot is needed just to click a labelled button, fill a field or read ordinary text. " +
             "Use android_ui find for a named target or scoped observe for a container before assuming a target is missing. " +
             "Use android_screenshot promptly for image-based questions, diagrams, visual layout or color judgments, ambiguous/missing labels, or controls not exposed by accessibility. Screenshots are a normal fallback, not a failure. " +

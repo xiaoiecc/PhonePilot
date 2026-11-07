@@ -36,12 +36,20 @@ internal object TraceActionMapper {
     }
 }
 
-internal class ToolTraceBatch(response: ComputerResponse, private val runId: String, private val step: Int) {
+internal class ToolTraceBatch(response: ComputerResponse, private val runId: String, private val step: Int,
+    includeHosted: Boolean = false) {
     private val json = Json { prettyPrint = true }
     private val entries = response.outputOrder.associateWith { id ->
         val function = response.functionCalls.firstOrNull { it.callId == id }
         val arguments: JsonElement = function?.arguments ?: JsonArray(response.calls.first { it.callId == id }.actions)
         Entry(id, function?.name ?: "computer", json.encodeToString(JsonElement.serializer(), arguments))
+    }.toMutableMap().apply {
+        if (includeHosted) response.hostedCalls.forEach { call ->
+            put(call.id, Entry(call.id, call.type, call.arguments).apply {
+                status = if (call.status == "completed") HistoryToolStatus.SUCCEEDED else HistoryToolStatus.FAILED
+                result = call.result
+            })
+        }
     }
     internal class Entry(val id: String, val name: String, val arguments: String) {
         var started = System.currentTimeMillis()

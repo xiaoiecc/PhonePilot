@@ -44,7 +44,9 @@ internal class PhoneAgent(
     private var restoredTranscript = ""
 
     override fun snapshot(): ConversationSnapshot = conversation
-    override fun canContinue(): Boolean = conversation.previousResponseId != null || restoredConversation
+    // Visible conversation identity survives a discarded protocol cursor. begin() explicitly
+    // supplies the retained transcript when that cursor cannot safely be reused.
+    override fun canContinue(): Boolean = conversation.previousResponseId != null || restoredConversation || restoredTranscript.isNotBlank()
     override fun cancelNetwork() { sessionClient?.cancel() }
 
     override fun restoreConversation(session: ConversationSnapshot, messages: List<ChatMessage>): Boolean {
@@ -163,6 +165,7 @@ internal class PhoneAgent(
         }
         owner.checkpoint()
         recordUsage(response.inputTokens, response.outputTokens, response.cachedInputTokens)
+        tools.recordHosted(response, owner.runId, currentStepNumber)
         if (response.text.isNotBlank()) {
             recordMessage(HistoryMessageRole.AGENT, response.text)
             owner.emit(RunProgress.Thinking(response.text))
@@ -171,6 +174,12 @@ internal class PhoneAgent(
         conversation = conversation.copy(previousResponseId = response.id)
         responseRequiresOutputs = response.calls.isNotEmpty() || response.functionCalls.isNotEmpty()
         if (!responseRequiresOutputs) {
+            if (response.text.isBlank() && response.hostedCalls.isNotEmpty()) {
+                val pending = consumePendingMessage()
+                nextInput = JsonArray(listOf(ComputerProtocol.userInput(pending ?:
+                    "Continue from the hosted tool results already in this response's context and answer the task. Do not repeat completed phone actions.")))
+                return TurnResult()
+            }
             check(response.text.isNotBlank()) { "模型未返回操作或最终答复" }
             val pending = consumePendingMessage(closeIfEmpty = true)
             if (pending != null) { nextInput = JsonArray(listOf(ComputerProtocol.userInput(pending))); return TurnResult() }

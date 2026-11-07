@@ -58,6 +58,7 @@ class ChatMessageAdapter : RecyclerView.Adapter<ChatMessageAdapter.MessageViewHo
                 if (user) R.color.surface_variant else R.color.surface))
             role.setText(if (user) R.string.chat_you else R.string.chat_assistant)
             text.text = message.text
+            android.text.util.Linkify.addLinks(text, android.text.util.Linkify.WEB_URLS)
         }
     }
 }

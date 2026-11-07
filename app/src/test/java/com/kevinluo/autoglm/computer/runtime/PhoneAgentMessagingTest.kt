@@ -165,7 +165,7 @@ class PhoneAgentMessagingTest {
         coVerify(exactly = 1) { h.screenshots.capture() }
     }
 
-    @Test fun `stop while submitting outputs abandons incomplete cursor and never retries input`() = runTest {
+    @Test fun `stop abandons incomplete cursor but permits safe chat continuation without replay`() = runTest {
         val h = RunnerHarness(this)
         var requests = 0
         coEvery { h.client.request(any(), any()) } coAnswers {
@@ -176,10 +176,17 @@ class PhoneAgentMessagingTest {
         }
         assertFalse(h.run().success)
         assertNull(h.runner.snapshot().previousResponseId)
-        assertFalse(h.runner.canContinue())
+        assertTrue(h.runner.canContinue())
         assertEquals(2, requests)
         coVerify(exactly = 1) { h.device.pressKey(3) }
         assertEquals(1, h.completions.size)
+        val conversationId = h.runner.snapshot().id
+        h.respond(finalResponse())
+        assertTrue(h.run("Continue the conversation").success)
+        assertEquals(conversationId, h.runner.snapshot().id)
+        coVerify { h.client.request(match { !it.toString().contains("function_call_output") &&
+            it.toString().contains("Earlier visible conversation") }, null) }
+        coVerify(exactly = 1) { h.device.pressKey(3) }
     }
 
     @Test fun `history finalization rejects new input and releases one completion afterwards`() = runTest {

@@ -19,6 +19,8 @@ PhonePilot retains its upstream Android, Shizuku, keyboard and overlay foundatio
 
 ## Official OpenAI API support
 
+Models can also use official `web_search` and `code_interpreter` tools with an automatic hosted Python container. Search citations have clickable source URLs and hosted calls appear in history; they require no local tool-output reply. Hosted Python cannot directly access or control the phone, and generated files are not automatically downloaded to it.
+
 Transient connection, timeout and recoverable service errors use backoff with up to three retries after the initial attempt. Requests retain their original input without replaying phone actions; stop/steering interrupts both calls and backoff. Authentication, quota and certificate failures are not blindly retried. See [network recovery](docs/network-retries.md).
 
 The endpoint is fixed to `https://api.openai.com/v1/responses`. Supply your own official OpenAI API key and an account entitled to the selected model and tools.

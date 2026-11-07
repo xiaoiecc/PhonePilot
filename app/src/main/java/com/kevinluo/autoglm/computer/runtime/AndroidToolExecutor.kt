@@ -47,6 +47,12 @@ internal class AndroidToolExecutor(
 
     suspend fun observe() = accessibility()?.observe()
 
+    suspend fun recordHosted(response: ComputerResponse, runId: String, stepNumber: Int) {
+        if (response.hostedCalls.isEmpty()) return
+        ToolTraceBatch(response.copy(calls = emptyList(), functionCalls = emptyList(), outputOrder = emptyList()),
+            runId, stepNumber, includeHosted = true).persist(history)
+    }
+
     private fun prepare(response: ComputerResponse, frame: Screenshot?, traces: ToolTraceBatch): List<Command> {
         require(response.outputOrder.toSet().size == response.outputOrder.size)
         require(response.outputOrder.size == response.calls.size + response.functionCalls.size)

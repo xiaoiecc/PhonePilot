@@ -307,7 +307,7 @@ class ComputerProtocolTest {
     fun `every function offers nullable commentary without changing the native computer schema`() {
         val tools = ComputerProtocol.requestBody(config, ComputerProtocol.initialInput("task", "tree"), null)["tools"]!!.jsonArray
         assertEquals(setOf("type"), tools.first().jsonObject.keys)
-        tools.drop(1).forEach { value ->
+        tools.filter { it.jsonObject["type"]?.jsonPrimitive?.content == "function" }.forEach { value ->
             val parameters = value.jsonObject["parameters"]!!.jsonObject
             val properties = parameters["properties"]!!.jsonObject
             assertEquals(properties.keys, parameters["required"]!!.jsonArray.map { it.jsonPrimitive.content }.toSet())
