@@ -5,6 +5,8 @@
 最近一次本地自动化：核心 19 项、Android JVM 490 项，共 509 项测试通过，零失败、错误或跳过。
 Debug 构建、Android Lint 和架构检查通过；Lint 有 339 条待处理警告，不能将通过理解为没有问题。
 
+后续网络恢复修改另以 61 项相关 JUnit 用例及 Debug 构建验证，覆盖 API 客户端、退避策略、取消/单飞、runner 消息和架构边界，零失败或跳过。采用本地故障注入，不制造手机断网或运行额外付费任务；此针对性验证不冒充重新运行整个测试集。
+
 ```bash
 ./gradlew :automation-core:test :app:testDebugUnitTest :app:assembleDebug :app:lintDebug
 ```

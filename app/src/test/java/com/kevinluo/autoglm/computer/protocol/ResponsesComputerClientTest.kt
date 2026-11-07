@@ -54,13 +54,13 @@ class ResponsesComputerClientTest {
         val calls = AtomicInteger()
         val http = OkHttpClient.Builder().addInterceptor { chain ->
             calls.incrementAndGet()
-            Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1).code(429).message("Too many requests")
+            Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1).code(401).message("Unauthorized")
                 .body("secret diagnostic".toResponseBody()).build()
         }.build()
         val failure = assertThrows(IOException::class.java) {
             runBlocking { ResponsesComputerClient(config, http).request(input) }
         }
-        assertEquals("OpenAI API returned HTTP 429", failure.message)
+        assertEquals("OpenAI API returned HTTP 401; category=http; attempts=1", failure.message)
         assertEquals(1, calls.get())
         http.dispatcher.executorService.shutdown()
     }

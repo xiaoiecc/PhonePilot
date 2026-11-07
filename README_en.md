@@ -19,6 +19,8 @@ PhonePilot retains its upstream Android, Shizuku, keyboard and overlay foundatio
 
 ## Official OpenAI API support
 
+Transient connection, timeout and recoverable service errors use backoff with up to three retries after the initial attempt. Requests retain their original input without replaying phone actions; stop/steering interrupts both calls and backoff. Authentication, quota and certificate failures are not blindly retried. See [network recovery](docs/network-retries.md).
+
 The endpoint is fixed to `https://api.openai.com/v1/responses`. Supply your own official OpenAI API key and an account entitled to the selected model and tools.
 
 | Setting | Current implementation |

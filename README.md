@@ -19,6 +19,8 @@ PhonePilot 是该项目的直接二次开发版本，继承其 Android 原生应
 
 ## OpenAI 官方 API 支持
 
+临时连接故障、超时及可恢复的服务错误会退避重试，首次失败后最多重试 3 次；保留原请求，不重放手机动作，停止或改向会中断请求与退避。鉴权、额度和证书等错误不会盲目重试。见 [网络恢复说明](docs/network-retries.md)。
+
 固定连接 `https://api.openai.com/v1/responses`，用户自行提供 OpenAI 官方 API Key，账户需具备相应模型和工具权限。
 
 | 设置项 | 当前实现 |
