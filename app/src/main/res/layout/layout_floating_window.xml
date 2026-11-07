@@ -91,12 +91,42 @@
                 app:tint="@color/icon_secondary" />
         </LinearLayout>
 
+        <!-- Steps List - Waterfall Flow (shown when running) -->
+        <androidx.recyclerview.widget.RecyclerView
+            android:id="@+id/steps_recycler_view"
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1"
+            android:clipToPadding="false"
+            android:padding="8dp"
+            android:overScrollMode="never"
+            android:visibility="gone" />
+
+        <!-- User Interaction Panel -->
+        <include
+            android:id="@+id/interaction_panel"
+            layout="@layout/layout_floating_interaction"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:visibility="gone" />
+
+        <!-- Result Message -->
+        <TextView
+            android:id="@+id/tv_result"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:background="@color/surface_variant"
+            android:paddingHorizontal="12dp"
+            android:paddingVertical="8dp"
+            android:textColor="@color/text_primary"
+            android:textSize="12sp"
+            android:visibility="gone" />
+
         <!-- Task Input Area (shown when idle) -->
         <LinearLayout
             android:id="@+id/input_area"
             android:layout_width="match_parent"
-            android:layout_height="0dp"
-            android:layout_weight="1"
+            android:layout_height="wrap_content"
             android:orientation="vertical"
             android:padding="12dp">
 
@@ -130,56 +160,49 @@
             <EditText
                 android:id="@+id/task_input"
                 android:layout_width="match_parent"
-                android:layout_height="0dp"
-                android:layout_weight="1"
+                android:layout_height="wrap_content"
+                android:minHeight="112dp"
                 android:background="@drawable/input_background"
                 android:gravity="top|start"
                 android:hint="@string/task_input_hint"
                 android:inputType="textMultiLine"
+                android:maxLines="6"
+                android:minLines="3"
                 android:padding="10dp"
                 android:textColor="@color/text_primary"
                 android:textColorHint="@color/text_hint"
-                android:textSize="13sp" />
+                android:textSize="14sp" />
 
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/btn_start"
+            <LinearLayout
                 android:layout_width="match_parent"
-                android:layout_height="40dp"
-                android:layout_marginTop="10dp"
-                android:text="@string/start_task"
-                android:textColor="@color/on_primary"
-                android:textSize="13sp"
-                app:backgroundTint="@color/primary"
-                app:cornerRadius="8dp"
-                app:icon="@drawable/ic_play"
-                app:iconGravity="textStart"
-                app:iconTint="@color/on_primary"
-                app:iconSize="18dp" />
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btn_new_task"
+                    style="@style/Widget.App.Button.Text"
+                    android:layout_width="wrap_content"
+                    android:layout_height="48dp"
+                    android:layout_marginEnd="8dp"
+                    android:text="@string/new_conversation"
+                    android:textSize="13sp"
+                    android:visibility="gone" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btn_start"
+                    android:layout_width="0dp"
+                    android:layout_height="48dp"
+                    android:layout_weight="1"
+                    android:text="@string/send_message"
+                    android:textColor="@color/on_primary"
+                    android:textSize="13sp"
+                    app:backgroundTint="@color/primary"
+                    app:cornerRadius="8dp" />
+            </LinearLayout>
 
         </LinearLayout>
-
-        <!-- Steps List - Waterfall Flow (shown when running) -->
-        <androidx.recyclerview.widget.RecyclerView
-            android:id="@+id/steps_recycler_view"
-            android:layout_width="match_parent"
-            android:layout_height="0dp"
-            android:layout_weight="1"
-            android:clipToPadding="false"
-            android:padding="8dp"
-            android:overScrollMode="never"
-            android:visibility="gone" />
-
-        <!-- Result Message -->
-        <TextView
-            android:id="@+id/tv_result"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:background="@color/surface_variant"
-            android:paddingHorizontal="12dp"
-            android:paddingVertical="8dp"
-            android:textColor="@color/text_primary"
-            android:textSize="12sp"
-            android:visibility="gone" />
 
         <!-- Control buttons container (shown when running/paused) -->
         <LinearLayout
@@ -253,23 +276,27 @@
 
         </LinearLayout>
 
-        <!-- New Task button (shown when completed/failed) -->
         <com.google.android.material.button.MaterialButton
-            android:id="@+id/btn_new_task"
+            android:id="@+id/btn_finish_wait"
+            style="@style/Widget.App.Button.Text"
             android:layout_width="match_parent"
             android:layout_height="36dp"
-            android:layout_margin="8dp"
-            android:text="@string/floating_new_task"
-            android:textColor="@color/on_primary"
-            android:textSize="12sp"
-            android:visibility="gone"
-            app:backgroundTint="@color/primary"
-            app:cornerRadius="8dp"
-            app:icon="@drawable/ic_plus"
-            app:iconGravity="textStart"
-            app:iconTint="@color/on_primary"
-            app:iconSize="16dp" />
+            android:layout_marginHorizontal="8dp"
+            android:text="@string/finish_waiting"
+            android:visibility="gone" />
 
+        <TextView
+            android:id="@+id/token_usage"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="end"
+            android:paddingStart="12dp"
+            android:paddingEnd="12dp"
+            android:paddingTop="2dp"
+            android:paddingBottom="8dp"
+            android:text="@string/overlay_token_usage_unknown"
+            android:textColor="#FF858585"
+            android:textSize="10sp" />
     </LinearLayout>
 
 </com.google.android.material.card.MaterialCardView>

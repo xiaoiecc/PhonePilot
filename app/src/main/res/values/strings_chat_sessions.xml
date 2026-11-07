@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="chat_sessions">会话列表</string>
+    <string name="chat_sessions_empty">还没有保存的会话</string>
+    <string name="chat_session_open_failed">无法切换会话。请先停止当前任务，或检查记录是否完整。</string>
+    <string name="chat_session_loading">正在打开会话…</string>
+    <string name="chat_session_current">当前 · %1$s</string>
+    <string name="chat_session_text_recovery">这段旧会话没有完整的服务端上下文，将根据已保存的聊天文字继续。</string>
+</resources>

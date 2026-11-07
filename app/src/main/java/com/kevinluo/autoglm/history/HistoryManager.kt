@@ -3,17 +3,31 @@ package com.kevinluo.autoglm.history
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
-import android.os.Build
 import android.util.Base64
 import com.kevinluo.autoglm.action.AgentAction
+import com.kevinluo.autoglm.core.ConversationSnapshot
+import com.kevinluo.autoglm.screenshot.ScreenshotCompression
+import com.kevinluo.autoglm.screenshot.Screenshot
 import com.kevinluo.autoglm.util.Logger
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.boolean
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.long
+import kotlinx.serialization.json.int
+import kotlinx.serialization.json.put
 import org.json.JSONArray
-import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
 
@@ -72,11 +86,45 @@ class HistoryManager private constructor(private val context: Context) {
      * @return The newly created [TaskHistory] instance
      *
      */
-    fun startTask(taskDescription: String): TaskHistory {
-        val task = TaskHistory(taskDescription = taskDescription)
+    fun startTask(taskDescription: String, conversationId: String? = null): TaskHistory {
+        clearCurrentScreenshot()
+        val id = java.util.UUID.randomUUID().toString()
+        val task = TaskHistory(id = id, taskDescription = taskDescription, conversationId = conversationId ?: id)
         currentTask = task
         Logger.d(TAG, "Started recording task: ${task.id}")
         return task
+    }
+
+    suspend fun recordMessage(role: HistoryMessageRole, text: String) = withContext(Dispatchers.IO) {
+        val task = currentTask ?: return@withContext
+        task.messages += HistoryMessage(role, text)
+        saveTask(task)
+    }
+
+    fun updateConversationSession(session: ConversationSnapshot) {
+        currentTask?.let { task ->
+            task.previousResponseId = session.previousResponseId
+            task.totalInputTokens = session.totalInputTokens
+            task.totalOutputTokens = session.totalOutputTokens
+            task.totalCachedTokens = session.totalCachedTokens
+            task.hasInputUsage = session.hasInputUsage
+            task.hasOutputUsage = session.hasOutputUsage
+        }
+    }
+
+    suspend fun loadConversation(conversationId: String): RestoredConversation? = withContext(Dispatchers.IO) {
+        val tasks = _historyList.value.filter { it.conversationId == conversationId }.map {
+            loadTask(it.id) ?: return@withContext null
+        }
+        ConversationHistory.restore(tasks, conversationId)
+    }
+
+    suspend fun getConversationRuns(conversationId: String): List<TaskHistory> = withContext(Dispatchers.IO) {
+        ConversationHistory.runs(_historyList.value.filter { it.conversationId == conversationId }.mapNotNull { loadTask(it.id) }, conversationId)
+    }
+
+    suspend fun deleteConversations(conversationIds: Set<String>) {
+        deleteTasks(_historyList.value.filter { it.conversationId in conversationIds }.map { it.id }.toSet())
     }
 
     /**
@@ -94,6 +142,60 @@ class HistoryManager private constructor(private val context: Context) {
         currentScreenshotBase64 = base64Data
         currentScreenshotWidth = width
         currentScreenshotHeight = height
+    }
+
+    /** A text-only tool turn must not inherit an image from an earlier turn or task. */
+    fun clearCurrentScreenshot() {
+        currentScreenshotBase64 = null
+        currentScreenshotWidth = 0
+        currentScreenshotHeight = 0
+    }
+
+    /** Persist provenance for one invocation; images never contain invented/replayed actions. */
+    suspend fun recordToolCall(call: HistoryToolCall, before: Screenshot? = null, after: Screenshot? = null) = withContext(Dispatchers.IO) {
+        val task = currentTask ?: return@withContext
+        val prefix = "tool_" + java.util.UUID.randomUUID().toString()
+        var beforePath: String? = null
+        var afterPath: String? = null
+        var annotatedPath: String? = null
+        var imageFailure = false
+        fun saveImage(label: String, bytes: ByteArray): String {
+            val directory = File(historyDir, task.id).also { it.mkdirs() }
+            val file = File(directory, "${prefix}_${label}.${ScreenshotCompression.extensionFor(bytes)}")
+            FileOutputStream(file).use { it.write(bytes) }
+            return file.absolutePath
+        }
+        try {
+            if (before != null && !before.isSensitive) {
+                val bytes = Base64.decode(before.base64Data, Base64.DEFAULT)
+                beforePath = saveImage("before", bytes)
+                if (call.actions.isNotEmpty()) {
+                    val action = call.actions.singleOrNull() ?: AgentAction.Batch(call.actions, delayMs = 0)
+                    val annotation = ScreenshotAnnotator.createAnnotation(action, before.width, before.height)
+                    if (annotation !is ActionAnnotation.None) {
+                        val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                        if (bitmap != null) {
+                            try {
+                                val density = context.resources.displayMetrics.density *
+                                    bitmap.width.toFloat() / context.resources.displayMetrics.widthPixels.coerceAtLeast(1)
+                                val annotated = ScreenshotAnnotator.annotate(bitmap, annotation, density)
+                                try { annotatedPath = saveImage("annotated", ScreenshotCompression.encode(annotated)) }
+                                finally { annotated.recycle() }
+                            } finally { bitmap.recycle() }
+                        } else imageFailure = true
+                    }
+                }
+            }
+        } catch (_: Exception) { imageFailure = true }
+        try {
+            if (after != null && !after.isSensitive) {
+                afterPath = if (beforePath != null && before?.base64Data == after.base64Data) beforePath
+                    else saveImage("after", Base64.decode(after.base64Data, Base64.DEFAULT))
+            }
+        } catch (_: Exception) { imageFailure = true }
+        task.toolCalls.add(call.copy(beforeScreenshotPath = beforePath, afterScreenshotPath = afterPath,
+            annotatedScreenshotPath = annotatedPath,
+            result = call.result + if (imageFailure) "\n[历史截图保存不完整；工具执行结果不因此改变]" else ""))
     }
 
     /**
@@ -124,10 +226,15 @@ class HistoryManager private constructor(private val context: Context) {
         var screenshotPath: String? = null
         var annotatedPath: String? = null
 
-        // Save screenshot if available
-        currentScreenshotBase64?.let { base64 ->
+        val tracedImages = task.toolCalls.filter { it.stepNumber == stepNumber }
+        if (tracedImages.isNotEmpty()) {
+            // Per-call traces already own the correct pre/post images. Never draw coordinates
+            // on a later, changed screen or save another copy of the same response screenshot.
+            screenshotPath = tracedImages.lastOrNull { it.afterScreenshotPath != null || it.beforeScreenshotPath != null }
+                ?.let { it.afterScreenshotPath ?: it.beforeScreenshotPath }
+        } else currentScreenshotBase64?.let { base64 ->
             try {
-                // Decode base64 to raw bytes (already WebP format)
+                // Reuse exactly the compressed bytes uploaded to the model (WebP or PNG).
                 val webpBytes = Base64.decode(base64, Base64.DEFAULT)
 
                 // Save original screenshot directly without re-compression
@@ -185,7 +292,7 @@ class HistoryManager private constructor(private val context: Context) {
      * Completes the current task recording.
      *
      * Finalizes the task with success/failure status and saves it to persistent storage.
-     * Empty tasks (no steps recorded) are discarded. The history list is updated and
+     * Runs with neither steps nor messages are discarded. The history list is updated and
      * old entries are trimmed if the maximum count is exceeded.
      *
      * @param success Whether the task completed successfully
@@ -195,8 +302,8 @@ class HistoryManager private constructor(private val context: Context) {
     suspend fun completeTask(success: Boolean, message: String?) = withContext(Dispatchers.IO) {
         val task = currentTask ?: return@withContext
 
-        // Don't save empty tasks (no steps recorded)
-        if (task.steps.isEmpty()) {
+        // Discard only runs with no steps and no conversation messages.
+        if (task.steps.isEmpty() && task.messages.isEmpty() && task.toolCalls.isEmpty()) {
             Logger.d(TAG, "Skipping empty task ${task.id}")
             currentTask = null
             return@withContext
@@ -214,10 +321,10 @@ class HistoryManager private constructor(private val context: Context) {
         updatedList.add(0, task)
 
         // Trim old history if needed
-        while (updatedList.size > MAX_HISTORY_COUNT) {
-            val removed = updatedList.removeAt(updatedList.size - 1)
-            deleteTaskFiles(removed.id)
-        }
+        val keptConversations = updatedList.map { it.conversationId }.distinct().take(MAX_HISTORY_COUNT).toSet()
+        val removedRuns = updatedList.filter { it.conversationId !in keptConversations }
+        removedRuns.forEach { deleteTaskFiles(it.id) }
+        updatedList.removeAll(removedRuns.toSet())
 
         _historyList.value = updatedList
         saveHistoryIndex()
@@ -316,7 +423,8 @@ class HistoryManager private constructor(private val context: Context) {
     ): String {
         val taskDir = File(historyDir, taskId).also { it.mkdirs() }
         val suffix = if (annotated) "_annotated" else ""
-        val file = File(taskDir, "step_${stepNumber}$suffix.webp")
+        val extension = ScreenshotCompression.extensionFor(webpBytes)
+        val file = File(taskDir, "step_${stepNumber}$suffix.$extension")
 
         FileOutputStream(file).use { out ->
             out.write(webpBytes)
@@ -335,22 +443,7 @@ class HistoryManager private constructor(private val context: Context) {
      * @return Absolute file path of the saved screenshot
      */
     private fun saveScreenshotBitmap(taskId: String, stepNumber: Int, bitmap: Bitmap, annotated: Boolean): String {
-        val taskDir = File(historyDir, taskId).also { it.mkdirs() }
-        val suffix = if (annotated) "_annotated" else ""
-        val file = File(taskDir, "step_${stepNumber}$suffix.webp")
-
-        FileOutputStream(file).use { out ->
-            @Suppress("DEPRECATION")
-            val format =
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                    Bitmap.CompressFormat.WEBP_LOSSY
-                } else {
-                    Bitmap.CompressFormat.WEBP
-                }
-            bitmap.compress(format, 85, out)
-        }
-
-        return file.absolutePath
+        return saveScreenshotBytes(taskId, stepNumber, ScreenshotCompression.encode(bitmap), annotated)
     }
 
     /**
@@ -361,35 +454,46 @@ class HistoryManager private constructor(private val context: Context) {
     private fun saveTask(task: TaskHistory) {
         val taskDir = File(historyDir, task.id).also { it.mkdirs() }
         val metaFile = File(taskDir, "meta.json")
-
-        val json =
-            JSONObject().apply {
-                put("id", task.id)
-                put("taskDescription", task.taskDescription)
-                put("startTime", task.startTime)
-                put("endTime", task.endTime)
-                put("success", task.success)
-                put("completionMessage", task.completionMessage)
-
-                val stepsArray = JSONArray()
+        val json = buildJsonObject {
+            put("id", task.id)
+            put("taskDescription", task.taskDescription)
+            put("startTime", task.startTime)
+            put("conversationId", task.conversationId)
+            put("previousResponseId", task.previousResponseId?.let { JsonPrimitive(it) } ?: JsonNull)
+            put("totalInputTokens", task.totalInputTokens)
+            put("totalOutputTokens", task.totalOutputTokens)
+            put("totalCachedTokens", task.totalCachedTokens)
+            put("hasInputUsage", task.hasInputUsage)
+            put("hasOutputUsage", task.hasOutputUsage)
+            put("endTime", task.endTime?.let { JsonPrimitive(it) } ?: JsonNull)
+            put("success", task.success)
+            put("completionMessage", task.completionMessage?.let { JsonPrimitive(it) } ?: JsonNull)
+            put("toolCalls", buildJsonArray { task.toolCalls.forEach { add(HistoryToolCallJson.encode(it)) } })
+            put("steps", buildJsonArray {
                 task.steps.forEach { step ->
-                    stepsArray.put(
-                        JSONObject().apply {
-                            put("stepNumber", step.stepNumber)
-                            put("timestamp", step.timestamp)
-                            put("thinking", step.thinking)
-                            put("actionDescription", step.actionDescription)
-                            put("screenshotPath", step.screenshotPath)
-                            put("annotatedScreenshotPath", step.annotatedScreenshotPath)
-                            put("success", step.success)
-                            put("message", step.message)
-                        },
-                    )
+                    add(buildJsonObject {
+                        put("stepNumber", step.stepNumber)
+                        put("timestamp", step.timestamp)
+                        put("thinking", step.thinking)
+                        put("actionDescription", step.actionDescription)
+                        put("screenshotPath", step.screenshotPath?.let { JsonPrimitive(it) } ?: JsonNull)
+                        put("annotatedScreenshotPath", step.annotatedScreenshotPath?.let { JsonPrimitive(it) } ?: JsonNull)
+                        put("success", step.success)
+                        put("message", step.message?.let { JsonPrimitive(it) } ?: JsonNull)
+                    })
                 }
-                put("steps", stepsArray)
-            }
-
-        metaFile.writeText(json.toString(2))
+            })
+            put("messages", buildJsonArray {
+                task.messages.forEach { message ->
+                    add(buildJsonObject {
+                        put("role", message.role.name)
+                        put("text", message.text)
+                        put("timestamp", message.timestamp)
+                    })
+                }
+            })
+        }
+        metaFile.writeText(json.toString())
     }
 
     /**
@@ -401,44 +505,8 @@ class HistoryManager private constructor(private val context: Context) {
     private fun loadTask(taskId: String): TaskHistory? {
         val metaFile = File(historyDir, "$taskId/meta.json")
         if (!metaFile.exists()) return null
-
         return try {
-            val json = JSONObject(metaFile.readText())
-            val steps = mutableListOf<HistoryStep>()
-
-            val stepsArray = json.optJSONArray("steps")
-            if (stepsArray != null) {
-                for (i in 0 until stepsArray.length()) {
-                    val stepJson = stepsArray.getJSONObject(i)
-                    steps.add(
-                        HistoryStep(
-                            stepNumber = stepJson.getInt("stepNumber"),
-                            timestamp = stepJson.getLong("timestamp"),
-                            thinking = stepJson.getString("thinking"),
-                            // Action is not serialized
-                            action = null,
-                            actionDescription = stepJson.getString("actionDescription"),
-                            screenshotPath = stepJson.optString("screenshotPath").takeIf { it.isNotEmpty() },
-                            annotatedScreenshotPath =
-                            stepJson
-                                .optString("annotatedScreenshotPath")
-                                .takeIf { it.isNotEmpty() },
-                            success = stepJson.getBoolean("success"),
-                            message = stepJson.optString("message").takeIf { it.isNotEmpty() },
-                        ),
-                    )
-                }
-            }
-
-            TaskHistory(
-                id = json.getString("id"),
-                taskDescription = json.getString("taskDescription"),
-                startTime = json.getLong("startTime"),
-                endTime = json.optLong("endTime"),
-                success = json.getBoolean("success"),
-                completionMessage = json.optString("completionMessage").takeIf { it.isNotEmpty() },
-                steps = steps,
-            )
+            taskHistoryFromJson(metaFile.readText())
         } catch (e: Exception) {
             Logger.e(TAG, "Failed to load task $taskId", e)
             null
@@ -485,8 +553,7 @@ class HistoryManager private constructor(private val context: Context) {
      */
     private fun saveHistoryIndex() {
         val indexFile = File(historyDir, INDEX_FILE)
-        val json = JSONArray()
-        _historyList.value.forEach { json.put(it.id) }
+        val json = buildJsonArray { _historyList.value.forEach { add(JsonPrimitive(it.id)) } }
         indexFile.writeText(json.toString())
     }
 
@@ -498,6 +565,54 @@ class HistoryManager private constructor(private val context: Context) {
 
         @Volatile
         private var instance: HistoryManager? = null
+
+        internal fun taskHistoryFromJson(raw: String): TaskHistory {
+            val json = Json.parseToJsonElement(raw).jsonObject
+            val steps = json["steps"]?.jsonArray?.map { element ->
+                val step = element.jsonObject
+                HistoryStep(
+                    stepNumber = step.getValue("stepNumber").jsonPrimitive.int,
+                    timestamp = step.getValue("timestamp").jsonPrimitive.long,
+                    thinking = step.getValue("thinking").jsonPrimitive.content,
+                    action = null,
+                    actionDescription = step.getValue("actionDescription").jsonPrimitive.content,
+                    screenshotPath = step["screenshotPath"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotEmpty() },
+                    annotatedScreenshotPath = step["annotatedScreenshotPath"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotEmpty() },
+                    success = step.getValue("success").jsonPrimitive.boolean,
+                    message = step["message"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotEmpty() },
+                )
+            }?.toMutableList() ?: mutableListOf()
+            val messages = json["messages"]?.jsonArray?.map { element ->
+                val message = element.jsonObject
+                HistoryMessage(
+                    role = HistoryMessageRole.valueOf(message.getValue("role").jsonPrimitive.content),
+                    text = message.getValue("text").jsonPrimitive.content,
+                    timestamp = message.getValue("timestamp").jsonPrimitive.long,
+                )
+            }?.toMutableList() ?: mutableListOf()
+            val id = json.getValue("id").jsonPrimitive.content
+            return TaskHistory(
+                id = id,
+                taskDescription = json.getValue("taskDescription").jsonPrimitive.content,
+                startTime = json.getValue("startTime").jsonPrimitive.long,
+                conversationId = json["conversationId"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() } ?: id,
+                endTime = json["endTime"]?.takeUnless { it is JsonNull }?.jsonPrimitive?.long,
+                success = json.getValue("success").jsonPrimitive.boolean,
+                completionMessage = json["completionMessage"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotEmpty() },
+                steps = steps,
+                messages = messages,
+                previousResponseId = json["previousResponseId"]?.takeUnless { it is JsonNull }?.jsonPrimitive?.content?.takeIf { it.isNotBlank() },
+                totalInputTokens = json["totalInputTokens"]?.jsonPrimitive?.long ?: 0,
+                totalOutputTokens = json["totalOutputTokens"]?.jsonPrimitive?.long ?: 0,
+                totalCachedTokens = json["totalCachedTokens"]?.jsonPrimitive?.long ?: 0,
+                hasInputUsage = json["hasInputUsage"]?.jsonPrimitive?.boolean ?: false,
+                hasOutputUsage = json["hasOutputUsage"]?.jsonPrimitive?.boolean ?: false,
+                toolCalls = json["toolCalls"]?.jsonArray?.mapNotNull { element ->
+                    // A damaged optional trace must not make an otherwise readable old chat vanish.
+                    runCatching { HistoryToolCallJson.decode(element.jsonObject) }.getOrNull()
+                }?.toMutableList() ?: mutableListOf(),
+            )
+        }
 
         /**
          * Gets the singleton instance of HistoryManager.

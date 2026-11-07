@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="session_messages">查看对话</string>
+    <string name="session_continue">继续对话</string>
+    <string name="session_load_failed">无法读取这段对话，请刷新后重试</string>
+</resources>

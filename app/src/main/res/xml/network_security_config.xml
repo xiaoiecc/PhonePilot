@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <network-security-config>
-    <!-- Allow cleartext (HTTP) traffic for local development -->
-    <base-config cleartextTrafficPermitted="true">
+    <!-- Model and subscription requests require HTTPS; loopback proxy uses CONNECT. -->
+    <base-config cleartextTrafficPermitted="false">
         <trust-anchors>
             <certificates src="system" />
         </trust-anchors>

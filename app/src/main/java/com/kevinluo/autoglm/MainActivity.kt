@@ -1,13 +1,16 @@
 package com.kevinluo.autoglm
 
-import android.content.ComponentName
 import android.content.Intent
-import android.content.ServiceConnection
 import android.content.pm.PackageManager
 import android.os.Bundle
-import android.os.IBinder
 import android.provider.Settings
 import android.widget.Toast
+import android.view.View
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.doOnLayout
+import androidx.core.view.updateLayoutParams
+import androidx.core.view.updatePadding
 import androidx.activity.viewModels
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
@@ -36,71 +39,19 @@ class MainActivity : BaseActivity() {
     private lateinit var bottomNav: BottomNavigationView
     private val viewModel: MainViewModel by viewModels()
 
-    private val componentManager: ComponentManager by lazy {
-        ComponentManager.getInstance(applicationContext)
-    }
-
-    // Shizuku service connection
-    private var userService: IUserService? = null
-    private var isServiceBound = false
-
-    private val userServiceConnection =
-        object : ServiceConnection {
-            override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
-                Logger.i(TAG, "UserService connected")
-                userService = IUserService.Stub.asInterface(service)
-                userService?.let { svc ->
-                    componentManager.onServiceConnected(svc)
-                    // TaskExecutionManager is now the sole PhoneAgentListener
-                    viewModel.updateShizukuStatus(ShizukuStatus.CONNECTED)
-                }
-            }
-
-            override fun onServiceDisconnected(name: ComponentName?) {
-                Logger.i(TAG, "UserService disconnected")
-                userService = null
-                componentManager.onServiceDisconnected()
-                viewModel.updateShizukuStatus(ShizukuStatus.NOT_RUNNING)
-            }
-        }
-
-    private val userServiceArgs =
-        Shizuku.UserServiceArgs(
-            ComponentName(
-                BuildConfig.APPLICATION_ID,
-                UserService::class.java.name,
-            ),
-        ).daemon(false)
-            .processNameSuffix("service")
-            .debuggable(BuildConfig.DEBUG)
-            .version(BuildConfig.VERSION_CODE)
-
     private val onRequestPermissionResultListener =
         Shizuku.OnRequestPermissionResultListener { requestCode, grantResult ->
             if (requestCode == SHIZUKU_PERMISSION_REQUEST_CODE) {
                 if (grantResult == PackageManager.PERMISSION_GRANTED) {
                     Logger.i(TAG, "Shizuku permission granted")
                     Toast.makeText(this, R.string.toast_shizuku_permission_granted, Toast.LENGTH_SHORT).show()
-                    bindUserService()
+                    ShizukuConnectionManager.refresh()
                 } else {
                     Logger.w(TAG, "Shizuku permission denied")
                     Toast.makeText(this, R.string.toast_shizuku_permission_denied, Toast.LENGTH_SHORT).show()
                     viewModel.updateShizukuStatus(ShizukuStatus.NO_PERMISSION)
                 }
             }
-        }
-
-    private val onBinderReceivedListener =
-        Shizuku.OnBinderReceivedListener {
-            Logger.i(TAG, "Shizuku binder received")
-            checkShizukuPermission()
-        }
-
-    private val onBinderDeadListener =
-        Shizuku.OnBinderDeadListener {
-            Logger.w(TAG, "Shizuku binder dead")
-            viewModel.updateShizukuStatus(ShizukuStatus.NOT_RUNNING)
-            unbindUserService()
         }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -142,6 +93,17 @@ class MainActivity : BaseActivity() {
         val targetFragment = intent.getStringExtra(EXTRA_TARGET_FRAGMENT)
 
         Logger.d(TAG, "Handling intent: action=$action, targetFragment=$targetFragment")
+        intent.getStringExtra("resume_conversation_id")?.takeIf { it.isNotBlank() }?.let { conversationId ->
+            intent.removeExtra("resume_conversation_id")
+            lifecycleScope.launch {
+                if (com.kevinluo.autoglm.task.TaskExecutionManager.loadConversation(conversationId)) {
+                    bottomNav.selectedItemId = R.id.taskFragment
+                } else {
+                    Toast.makeText(this@MainActivity, R.string.chat_session_open_failed, Toast.LENGTH_LONG).show()
+                }
+            }
+            return
+        }
 
         // Determine target destination based on action or extra
         val destinationId =
@@ -160,7 +122,8 @@ class MainActivity : BaseActivity() {
             bottomNav.post {
                 try {
                     if (navController.currentDestination?.id != destId) {
-                        navController.navigate(destId)
+                        // Route external entry points through the same tab-stack owner as taps.
+                        bottomNav.selectedItemId = destId
                         Logger.d(TAG, "Navigated to destination: $destId")
                     }
                 } catch (e: Exception) {
@@ -173,6 +136,7 @@ class MainActivity : BaseActivity() {
     override fun onResume() {
         super.onResume()
         checkOverlayPermission()
+        ShizukuConnectionManager.refresh()
     }
 
     override fun onDestroy() {
@@ -180,10 +144,7 @@ class MainActivity : BaseActivity() {
         Logger.d(TAG, "MainActivity destroyed")
 
         Shizuku.removeRequestPermissionResultListener(onRequestPermissionResultListener)
-        Shizuku.removeBinderReceivedListener(onBinderReceivedListener)
-        Shizuku.removeBinderDeadListener(onBinderDeadListener)
 
-        unbindUserService()
     }
 
     /**
@@ -206,34 +167,8 @@ class MainActivity : BaseActivity() {
         // This ensures that when switching tabs, the previous Fragment's state is preserved
         bottomNav.setupWithNavController(navController)
 
-        // Set up item selection listener to handle state preservation
-        bottomNav.setOnItemSelectedListener { item ->
-            // Use NavigationUI to handle navigation with state saving
-            val builder =
-                androidx.navigation.NavOptions.Builder()
-                    .setLaunchSingleTop(true)
-                    .setRestoreState(true)
-                    .setPopUpTo(
-                        navController.graph.startDestinationId,
-                        inclusive = false,
-                        saveState = true,
-                    )
-
-            val options = builder.build()
-
-            try {
-                navController.navigate(item.itemId, null, options)
-                true
-            } catch (e: IllegalArgumentException) {
-                Logger.w(TAG, "Navigation failed for item: ${item.itemId}", e)
-                false
-            }
-        }
-
-        // Sync the selected item with the current destination
-        navController.addOnDestinationChangedListener { _, destination, _ ->
-            bottomNav.menu.findItem(destination.id)?.isChecked = true
-        }
+        // NavigationUI already owns selection, state saving, restoration and destination sync.
+        // Replacing its listener corrupts tab restoration after an external settings intent.
 
         Logger.d(TAG, "Navigation setup complete with state preservation")
     }
@@ -246,8 +181,28 @@ class MainActivity : BaseActivity() {
      */
     private fun setupEdgeToEdge() {
         val rootLayout = findViewById<androidx.coordinatorlayout.widget.CoordinatorLayout>(R.id.rootLayout)
-        setupEdgeToEdgeInsets(rootLayout, applyTop = true, applyBottom = false)
+        val host = findViewById<View>(R.id.nav_host_fragment)
+        var keyboardVisible = false
+        ViewCompat.setOnApplyWindowInsetsListener(rootLayout) { view, insets ->
+            val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
+            val ime = insets.getInsets(WindowInsetsCompat.Type.ime())
+            keyboardVisible = insets.isVisible(WindowInsetsCompat.Type.ime())
+            view.updatePadding(left = bars.left, top = bars.top, right = bars.right,
+                bottom = if (keyboardVisible) ime.bottom else 0)
+            bottomNav.visibility = if (keyboardVisible) View.GONE else View.VISIBLE
+            host.updateLayoutParams<androidx.coordinatorlayout.widget.CoordinatorLayout.LayoutParams> {
+                bottomMargin = if (keyboardVisible) 0 else
+                    bottomNav.height.takeIf { it > 0 } ?: ((60 * resources.displayMetrics.density).toInt() + bars.bottom)
+            }
+            insets
+        }
+        bottomNav.doOnLayout {
+            if (!keyboardVisible) host.updateLayoutParams<androidx.coordinatorlayout.widget.CoordinatorLayout.LayoutParams> {
+                bottomMargin = bottomNav.height
+            }
+        }
         setupEdgeToEdgeInsets(bottomNav, applyTop = false, applyBottom = true)
+        ViewCompat.requestApplyInsets(rootLayout)
     }
 
     /**
@@ -255,87 +210,33 @@ class MainActivity : BaseActivity() {
      */
     private fun setupShizuku() {
         Shizuku.addRequestPermissionResultListener(onRequestPermissionResultListener)
-        Shizuku.addBinderReceivedListener(onBinderReceivedListener)
-        Shizuku.addBinderDeadListener(onBinderDeadListener)
-
-        // Check initial Shizuku state
-        if (Shizuku.pingBinder()) {
-            checkShizukuPermission()
-        } else {
-            viewModel.updateShizukuStatus(ShizukuStatus.NOT_RUNNING)
+        ShizukuConnectionManager.initialize(applicationContext)
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                ShizukuConnectionManager.status.collect { viewModel.updateShizukuStatus(it) }
+            }
         }
+        checkShizukuPermission()
     }
 
-    /**
-     * Checks Shizuku permission and binds service if granted.
-     */
+    /** Permission prompts belong to visible UI; the process connection only observes permission. */
     private fun checkShizukuPermission() {
         try {
+            if (!Shizuku.pingBinder()) return
             if (Shizuku.isPreV11()) {
-                Logger.w(TAG, "Shizuku version too low")
                 Toast.makeText(this, R.string.toast_shizuku_version_low, Toast.LENGTH_SHORT).show()
-                viewModel.updateShizukuStatus(ShizukuStatus.NOT_RUNNING)
                 return
             }
-
-            when {
-                Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED -> {
-                    Logger.i(TAG, "Shizuku permission already granted")
-                    bindUserService()
-                }
-
-                Shizuku.shouldShowRequestPermissionRationale() -> {
-                    Logger.i(TAG, "Should show Shizuku permission rationale")
-                    viewModel.updateShizukuStatus(ShizukuStatus.NO_PERMISSION)
-                }
-
-                else -> {
-                    Logger.i(TAG, "Requesting Shizuku permission")
-                    viewModel.updateShizukuStatus(ShizukuStatus.NO_PERMISSION)
-                    Shizuku.requestPermission(SHIZUKU_PERMISSION_REQUEST_CODE)
-                }
+            if (Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED) {
+                ShizukuConnectionManager.refresh()
+            } else if (!Shizuku.shouldShowRequestPermissionRationale()) {
+                Shizuku.requestPermission(SHIZUKU_PERMISSION_REQUEST_CODE)
             }
-        } catch (e: Exception) {
-            Logger.e(TAG, "Error checking Shizuku permission", e)
+        } catch (error: Exception) {
+            Logger.e(TAG, "Unable to check Shizuku permission", error)
             viewModel.updateShizukuStatus(ShizukuStatus.NOT_RUNNING)
         }
     }
-
-    /**
-     * Binds to the UserService via Shizuku.
-     */
-    private fun bindUserService() {
-        if (isServiceBound) {
-            Logger.d(TAG, "UserService already bound")
-            return
-        }
-
-        try {
-            viewModel.updateShizukuStatus(ShizukuStatus.CONNECTING)
-            Shizuku.bindUserService(userServiceArgs, userServiceConnection)
-            isServiceBound = true
-            Logger.i(TAG, "UserService bind requested")
-        } catch (e: Exception) {
-            Logger.e(TAG, "Failed to bind UserService", e)
-            viewModel.updateShizukuStatus(ShizukuStatus.NOT_RUNNING)
-        }
-    }
-
-    /**
-     * Unbinds from the UserService.
-     */
-    private fun unbindUserService() {
-        if (!isServiceBound) return
-
-        try {
-            Shizuku.unbindUserService(userServiceArgs, userServiceConnection, true)
-            isServiceBound = false
-            Logger.i(TAG, "UserService unbound")
-        } catch (e: Exception) {
-            Logger.e(TAG, "Error unbinding UserService", e)
-        }
-    }
-
     /**
      * Checks and updates overlay permission status.
      */
@@ -361,6 +262,12 @@ class MainActivity : BaseActivity() {
      * Handles UI events from the ViewModel.
      */
     private fun handleEvent(event: MainUiEvent) {
+        if (event is MainUiEvent.RunEvent) {
+            val task = com.kevinluo.autoglm.task.TaskExecutionManager.taskState.value
+            if (!com.kevinluo.autoglm.task.RunEventIdentity.accepts(
+                event.runId, task.runId, requiresActive = event is MainUiEvent.MinimizeApp, active = task.isExecuting,
+            )) return
+        }
         when (event) {
             is MainUiEvent.ShowToast -> {
                 Toast.makeText(this, event.messageResId, Toast.LENGTH_SHORT).show()

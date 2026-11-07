@@ -4,6 +4,7 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.kevinluo.autoglm.task.TaskExecutionManager
+import com.kevinluo.autoglm.task.isActive
 import com.kevinluo.autoglm.util.Logger
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -68,6 +69,7 @@ data class MainUiState(
     val currentAction: String = "",
     val isTaskRunning: Boolean = false,
     val canStartTask: Boolean = false,
+    val canContinueConversation: Boolean = false,
 )
 
 /**
@@ -114,17 +116,18 @@ sealed class MainUiEvent {
      *
      * @property message The completion message
      */
-    data class TaskCompleted(val message: String) : MainUiEvent()
+    sealed class RunEvent(open val runId: String) : MainUiEvent()
+    data class TaskCompleted(override val runId: String, val message: String) : RunEvent(runId)
 
     /**
      * Event indicating task failure.
      *
      * @property error The error message
      */
-    data class TaskFailed(val error: String) : MainUiEvent()
+    data class TaskFailed(override val runId: String, val error: String) : RunEvent(runId)
 
     /** Event to minimize the app. */
-    object MinimizeApp : MainUiEvent()
+    data class MinimizeApp(override val runId: String) : RunEvent(runId)
 }
 
 /**
@@ -151,6 +154,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val outputLog: StateFlow<String> = _outputLog.asStateFlow()
 
     private val logBuilder = StringBuilder()
+    private val conversationDrafts = mutableMapOf<String?, String>()
+
+    fun saveDraft(conversationId: String?, text: String) { conversationDrafts[conversationId] = text }
+    fun draftFor(conversationId: String?): String = conversationDrafts[conversationId].orEmpty()
 
     // region Cross-Fragment State Sharing
 
@@ -189,9 +196,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             TaskExecutionManager.taskState.collect { taskState ->
                 Logger.d(TAG, "TaskState updated: status=${taskState.status}, step=${taskState.stepNumber}")
 
-                val isRunning =
-                    taskState.status == TaskStatus.RUNNING ||
-                        taskState.status == TaskStatus.PAUSED
+                val isRunning = taskState.status.isActive || taskState.isExecuting
 
                 _uiState.value =
                     _uiState.value.copy(
@@ -201,26 +206,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         currentAction = taskState.currentAction,
                         isTaskRunning = isRunning,
                         canStartTask = calculateCanStartTask(isRunning = isRunning),
+                        canContinueConversation = TaskExecutionManager.canContinueConversation(),
                     )
 
-                // Emit events for task completion/failure
-                when (taskState.status) {
-                    TaskStatus.COMPLETED -> {
-                        if (taskState.resultMessage.isNotEmpty()) {
-                            appendLog("Task completed: ${taskState.resultMessage}")
-                            _events.emit(MainUiEvent.TaskCompleted(taskState.resultMessage))
-                        }
-                    }
-
-                    TaskStatus.FAILED -> {
-                        if (taskState.resultMessage.isNotEmpty()) {
-                            appendLog("Task failed: ${taskState.resultMessage}")
-                            _events.emit(MainUiEvent.TaskFailed(taskState.resultMessage))
-                        }
-                    }
-
-                    else -> { /* No event needed */ }
-                }
+            }
+        }
+        viewModelScope.launch {
+            TaskExecutionManager.completions.collect { completed ->
+                if (!com.kevinluo.autoglm.task.RunEventIdentity.accepts(completed.runId, TaskExecutionManager.taskState.value.runId)) return@collect
+                val result = completed.outcome
+                appendLog(if (result.success) "Task completed: ${result.message}" else "Task failed: ${result.message}")
+                _events.emit(if (result.success) MainUiEvent.TaskCompleted(completed.runId, result.message) else MainUiEvent.TaskFailed(completed.runId, result.message))
             }
         }
     }
@@ -348,30 +344,25 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      * @param taskDescription The description of the task to execute
      *
      */
-    fun startTask(taskDescription: String) {
-        if (!TaskExecutionManager.canStartTask()) {
-            appendLog("Error: Cannot start task - preconditions not met")
-            Logger.w(TAG, "Cannot start task: preconditions not met")
-            return
+    fun startTask(taskDescription: String): Boolean {
+        val alreadyRunning = TaskExecutionManager.isTaskRunning()
+        if (!TaskExecutionManager.sendMessage(taskDescription)) return false
+        if (!alreadyRunning) {
+            logBuilder.clear()
+            _outputLog.value = ""
+            val runId = TaskExecutionManager.taskState.value.runId
+            if (runId != null) viewModelScope.launch { _events.emit(MainUiEvent.MinimizeApp(runId)) }
         }
+        return true
+    }
 
-        // Clear previous output
+    fun startNewConversation(taskDescription: String): Boolean {
+        if (!TaskExecutionManager.startNewConversation(taskDescription)) return false
         logBuilder.clear()
         _outputLog.value = ""
-
-        Logger.d(TAG, "Starting task: ${taskDescription.take(50)}...")
-        appendLog("Starting task: $taskDescription")
-
-        // Notify state manager that task is starting
-        FloatingWindowStateManager.onTaskStarted(getApplication())
-
-        viewModelScope.launch {
-            // Minimize app
-            _events.emit(MainUiEvent.MinimizeApp)
-        }
-
-        // Start task via TaskExecutionManager
-        TaskExecutionManager.startTask(taskDescription)
+        val runId = TaskExecutionManager.taskState.value.runId
+        if (runId != null) viewModelScope.launch { _events.emit(MainUiEvent.MinimizeApp(runId)) }
+        return true
     }
 
     /**
@@ -382,8 +373,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         Logger.d(TAG, "Cancelling task")
         TaskExecutionManager.cancelTask()
         appendLog("Task cancelled by user")
-        // Notify state manager that task completed
-        FloatingWindowStateManager.onTaskCompleted()
     }
 
     /**

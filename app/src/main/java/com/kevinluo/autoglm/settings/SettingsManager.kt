@@ -54,6 +54,10 @@ data class TaskTemplate(val id: String, val name: String, val description: Strin
  * - 配置变更检测更准确
  */
 class SettingsManager private constructor(private val context: Context) {
+    fun reasoningLevels(model: String): List<String> =
+        if (model == "gpt-6.1-terra") listOf("none", "low", "medium", "high", "xhigh", "max")
+        else listOf("low", "medium", "high", "xhigh", "max")
+
     companion object {
         private const val TAG = "SettingsManager"
         private const val PREFS_NAME = "autoglm_settings"
@@ -85,6 +89,7 @@ class SettingsManager private constructor(private val context: Context) {
         private const val KEY_TOP_P = "model_top_p"
         private const val KEY_FREQUENCY_PENALTY = "model_frequency_penalty"
         private const val KEY_TIMEOUT_SECONDS = "model_timeout_seconds"
+        private const val KEY_REASONING_EFFORT = "model_reasoning_effort"
 
         // AgentConfig keys
         private const val KEY_MAX_STEPS = "agent_max_steps"
@@ -133,8 +138,7 @@ class SettingsManager private constructor(private val context: Context) {
     /**
      * Creates encrypted SharedPreferences for sensitive data.
      *
-     * Falls back to regular SharedPreferences on older devices (below Android M)
-     * or if encryption initialization fails.
+     * Refuses plaintext persistence when the device keystore is unavailable.
      *
      * @return SharedPreferences instance for storing sensitive data
      *
@@ -154,13 +158,9 @@ class SettingsManager private constructor(private val context: Context) {
                 EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
                 EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
             )
-        } else {
-            Logger.w(TAG, "Device does not support EncryptedSharedPreferences, using regular prefs")
-            context.getSharedPreferences(SECURE_PREFS_NAME, Context.MODE_PRIVATE)
-        }
+        } else { error("此设备不支持安全密钥存储") }
     } catch (e: Exception) {
-        Logger.e(TAG, "Failed to create encrypted prefs, using fallback", e)
-        context.getSharedPreferences(SECURE_PREFS_NAME, Context.MODE_PRIVATE)
+        throw IllegalStateException("无法打开加密设置，请先解锁手机；未保存明文密钥", e)
     }
 
     /**
@@ -189,6 +189,7 @@ class SettingsManager private constructor(private val context: Context) {
             topP = prefs.getFloat(KEY_TOP_P, DEFAULT_MODEL_CONFIG.topP),
             frequencyPenalty = prefs.getFloat(KEY_FREQUENCY_PENALTY, DEFAULT_MODEL_CONFIG.frequencyPenalty),
             timeoutSeconds = prefs.getLong(KEY_TIMEOUT_SECONDS, DEFAULT_MODEL_CONFIG.timeoutSeconds),
+            reasoningEffort = prefs.getString(KEY_REASONING_EFFORT, "medium") ?: "medium",
         )
     }
 
@@ -202,6 +203,9 @@ class SettingsManager private constructor(private val context: Context) {
      *
      */
     fun saveModelConfig(config: ModelConfig) {
+        require(config.baseUrl.trimEnd('/') == "https://api.openai.com/v1")
+        require(config.modelName in listOf("gpt-6.1-sol", "gpt-6.1-terra"))
+        require(config.reasoningEffort in reasoningLevels(config.modelName))
         Logger.d(TAG, "Saving model configuration: baseUrl=${config.baseUrl}, modelName=${config.modelName}")
         // Save non-sensitive data to regular prefs
         prefs.edit().apply {
@@ -212,6 +216,7 @@ class SettingsManager private constructor(private val context: Context) {
             putFloat(KEY_TOP_P, config.topP)
             putFloat(KEY_FREQUENCY_PENALTY, config.frequencyPenalty)
             putLong(KEY_TIMEOUT_SECONDS, config.timeoutSeconds)
+            putString(KEY_REASONING_EFFORT, config.reasoningEffort)
             apply()
         }
 
@@ -335,6 +340,7 @@ class SettingsManager private constructor(private val context: Context) {
                         baseUrl = obj.getString("baseUrl"),
                         apiKey = securePrefs.getString("profile_apikey_$id", "EMPTY") ?: "EMPTY",
                         modelName = obj.getString("modelName"),
+                        reasoningEffort = obj.optString("reasoningEffort", "medium"),
                         maxTokens = obj.optInt("maxTokens", DEFAULT_MODEL_CONFIG.maxTokens),
                         temperature =
                         obj
@@ -472,6 +478,7 @@ class SettingsManager private constructor(private val context: Context) {
                     put("topP", profile.config.topP)
                     put("frequencyPenalty", profile.config.frequencyPenalty)
                     put("timeoutSeconds", profile.config.timeoutSeconds)
+                    put("reasoningEffort", profile.config.reasoningEffort)
                 }
             array.put(obj)
         }

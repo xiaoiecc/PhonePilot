@@ -5,11 +5,13 @@ import android.graphics.BitmapFactory
 import android.os.Build
 import android.util.Base64
 import com.kevinluo.autoglm.IUserService
+import com.kevinluo.autoglm.device.DeviceCommandClient
 import com.kevinluo.autoglm.util.ErrorHandler
 import com.kevinluo.autoglm.util.Logger
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import java.io.ByteArrayOutputStream
 
@@ -79,9 +81,10 @@ interface FloatingWindowController {
  *
  */
 class ScreenshotService(
-    private val userService: IUserService,
+    userService: IUserService,
     private val floatingWindowControllerProvider: () -> FloatingWindowController? = { null },
 ) {
+    private val commandClient = DeviceCommandClient(userService)
     companion object {
         private const val TAG = "ScreenshotService"
         private const val HIDE_DELAY_MS = 200L
@@ -89,20 +92,18 @@ class ScreenshotService(
         private const val FALLBACK_WIDTH = 1080
         private const val FALLBACK_HEIGHT = 1920
 
-        // Screenshot compression settings - optimized for API upload
-        private const val WEBP_QUALITY = 65 // Reduced from 70 for better compression
+        // Lossless screenshots preserve small UI text after the existing resolution limit.
+        private const val WEBP_QUALITY = 50
 
         /**
-         * Returns the appropriate WebP compress format based on API level.
-         * WEBP_LOSSY is only available on API 30+, use deprecated WEBP for older versions.
+         * Old Android versions use PNG rather than silently falling back to lossy WebP.
          */
-        @Suppress("DEPRECATION")
         val WEBP_FORMAT: Bitmap.CompressFormat
             get() =
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                    Bitmap.CompressFormat.WEBP_LOSSY
+                    Bitmap.CompressFormat.WEBP_LOSSLESS
                 } else {
-                    Bitmap.CompressFormat.WEBP
+                    Bitmap.CompressFormat.PNG
                 }
 
         // Screenshot scaling settings - use max dimensions instead of fixed scale factor
@@ -111,7 +112,8 @@ class ScreenshotService(
         private const val MAX_HEIGHT = 1280 // Max height after scaling
 
         // Base64 output chunk size for reading (safe for Binder)
-        private const val BASE64_CHUNK_SIZE = 500000
+        private const val BASE64_CHUNK_SIZE = 480000
+        private val screenshotCommands = ScreenshotCommandGate()
     }
 
     /**
@@ -126,36 +128,20 @@ class ScreenshotService(
      */
     suspend fun capture(): Screenshot = withContext(Dispatchers.IO) {
         val floatingWindowController = floatingWindowControllerProvider()
-        val hasFloatingWindow = floatingWindowController != null
         Logger.d(TAG, "Starting screenshot capture, window visible: ${floatingWindowController?.isVisible()}")
 
-        // Hide floating window before capture
-        if (hasFloatingWindow) {
-            Logger.d(TAG, "Hiding floating window")
-            withContext(Dispatchers.Main) {
-                floatingWindowController?.hide()
-            }
-            delay(HIDE_DELAY_MS)
-        }
-
         try {
-            // Capture screenshot
             val result = captureScreen()
             Logger.logScreenshot(result.width, result.height, result.isSensitive)
             result
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: ScreenshotCaptureException) {
+            throw e
         } catch (e: Exception) {
             val handledError = ErrorHandler.handleScreenshotError(e.message ?: "Unknown error", false, e)
             Logger.e(TAG, ErrorHandler.formatErrorForLog(handledError), e)
             createFallbackScreenshot()
-        } finally {
-            // Always restore floating window after capture (success or failure)
-            if (hasFloatingWindow) {
-                delay(SHOW_DELAY_MS)
-                Logger.d(TAG, "Restoring floating window")
-                withContext(Dispatchers.Main) {
-                    floatingWindowController?.showAndBringToFront()
-                }
-            }
         }
     }
 
@@ -194,24 +180,23 @@ class ScreenshotService(
             // Calculate scaled dimensions based on max size constraints
             val (scaledWidth, scaledHeight) = calculateOptimalDimensions(originalWidth, originalHeight)
 
-            // Scale bitmap if needed
-            if (scaledWidth != originalWidth || scaledHeight != originalHeight) {
-                val scaledBitmap = Bitmap.createScaledBitmap(bitmap, scaledWidth, scaledHeight, true)
+            val imageData = try {
+                if (scaledWidth != originalWidth || scaledHeight != originalHeight) {
+                    val scaledBitmap = Bitmap.createScaledBitmap(bitmap, scaledWidth, scaledHeight, true)
+                    if (scaledBitmap !== bitmap) bitmap.recycle()
+                    bitmap = scaledBitmap
+                    Logger.d(TAG, "Scaled from ${originalWidth}x$originalHeight to ${scaledWidth}x$scaledHeight")
+                }
+                ScreenshotCompression.encode(bitmap, pngData.takeIf {
+                    scaledWidth == originalWidth && scaledHeight == originalHeight
+                })
+            } finally {
                 bitmap.recycle()
-                bitmap = scaledBitmap
-                Logger.d(TAG, "Scaled from ${originalWidth}x$originalHeight to ${scaledWidth}x$scaledHeight")
             }
+            val compressionRatio = 100L * imageData.size / pngData.size
+            Logger.d(TAG, "Lossless ${ScreenshotCompression.extensionFor(imageData)}: ${imageData.size} bytes ($compressionRatio% of captured PNG)")
 
-            // Convert to WebP for better compression
-            val webpStream = ByteArrayOutputStream()
-            bitmap.compress(WEBP_FORMAT, WEBP_QUALITY, webpStream)
-            bitmap.recycle()
-
-            val webpData = webpStream.toByteArray()
-            val compressionRatio = if (pngData.isNotEmpty()) 100 * webpData.size / pngData.size else 0
-            Logger.d(TAG, "Converted to WebP: ${webpData.size} bytes ($compressionRatio% of PNG)")
-
-            val base64Data = encodeToBase64(webpData)
+            val base64Data = encodeToBase64(imageData)
             Logger.d(TAG, "Screenshot captured: ${scaledWidth}x$scaledHeight, base64 length: ${base64Data.length}")
 
             Screenshot(
@@ -222,6 +207,10 @@ class ScreenshotService(
                 originalHeight = originalHeight,
                 isSensitive = false,
             )
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: ScreenshotCaptureException) {
+            throw e
         } catch (e: Exception) {
             Logger.e(TAG, "Screenshot capture failed", e)
             createFallbackScreenshot()
@@ -270,8 +259,8 @@ class ScreenshotService(
      *
      */
     private suspend fun executeScreencapToBytes(): ByteArray? = coroutineScope {
-        val timestamp = System.currentTimeMillis()
-        val pngFile = "/data/local/tmp/screenshot_$timestamp.png"
+        val imageId = java.util.UUID.randomUUID().toString().replace("-", "")
+        val pngFile = "/data/local/tmp/screenshot_$imageId.png"
         val base64File = "$pngFile.b64"
 
         try {
@@ -279,19 +268,18 @@ class ScreenshotService(
             val startTime = System.currentTimeMillis()
 
             // Capture screenshot and pipe to base64
-            val captureResult =
-                userService.executeCommand(
-                    "screencap -p | base64 > $base64File && stat -c %s $base64File",
-                )
+            // Only capturing pixels needs a hidden overlay. Reads, decoding, compression and
+            // cleanup happen after restoration, so a slow encoder cannot hide the controls.
+            val captureResult = withOverlayHidden(
+                floatingWindowControllerProvider(), hideDelayMs = HIDE_DELAY_MS,
+                showDelayMs = SHOW_DELAY_MS, bringToFront = true,
+            ) {
+                val script = "set -e\nscreencap -p $pngFile\nbase64 $pngFile > $base64File\nstat -c %s $base64File"
+                screenshotCommand("CAPTURE", listOf("sh", "-c", script), 8000)
+            }
 
             val captureTime = System.currentTimeMillis() - startTime
             Logger.d(TAG, "Screenshot capture took ${captureTime}ms")
-
-            // Check for errors
-            if (captureResult.contains("Error") || captureResult.contains("permission denied", ignoreCase = true)) {
-                Logger.w(TAG, "Screenshot capture failed: $captureResult")
-                return@coroutineScope null
-            }
 
             // Parse base64 file size from output
             val base64Size =
@@ -301,7 +289,7 @@ class ScreenshotService(
                     ?.trim()
                     ?.toLongOrNull() ?: 0L
 
-            if (base64Size == 0L) {
+            if (base64Size !in 1..16_000_000L) {
                 Logger.w(TAG, "Base64 file not created or empty")
                 return@coroutineScope null
             }
@@ -310,18 +298,22 @@ class ScreenshotService(
 
             // Read base64 file
             val readStartTime = System.currentTimeMillis()
+            val readDeadline = System.nanoTime() + 12_000_000_000L
+            suspend fun readChunk(argv: List<String>): String {
+                val remaining = (readDeadline - System.nanoTime()) / 1_000_000
+                if (remaining < 100) throw ScreenshotCaptureException("截图读取超时，任务已停止；悬浮窗已恢复")
+                return screenshotCommand("READ", argv, minOf(3000L, remaining))
+            }
             val base64Data: String
 
             if (base64Size <= BASE64_CHUNK_SIZE) {
                 // Small file - read in one go
-                val result = userService.executeCommand("cat $base64File")
+                val result = readChunk(listOf("cat", base64File))
                 base64Data =
                     result
                         .lines()
                         .filter { line ->
-                            !line.startsWith("[") &&
-                                line.isNotBlank() &&
-                                !line.contains("exit code", ignoreCase = true)
+                            line.isNotBlank()
                         }.joinToString("")
             } else {
                 // Large file - read chunks sequentially to avoid Binder buffer overflow
@@ -336,17 +328,15 @@ class ScreenshotService(
                     val currentChunkSize = minOf(BASE64_CHUNK_SIZE.toLong(), remaining)
 
                     val chunkResult =
-                        userService.executeCommand(
-                            "tail -c +${offset + 1} $base64File | head -c $currentChunkSize",
+                        readChunk(
+                            listOf("sh", "-c", "tail -c +${offset + 1} $base64File | head -c $currentChunkSize"),
                         )
 
                     val chunkData =
                         chunkResult
                             .lines()
                             .filter { line ->
-                                !line.startsWith("[") &&
-                                    line.isNotBlank() &&
-                                    !line.contains("exit code", ignoreCase = true)
+                                line.isNotBlank()
                             }.joinToString("")
 
                     chunks.add(chunkData)
@@ -364,17 +354,43 @@ class ScreenshotService(
             }
 
             Base64.decode(base64Data, Base64.DEFAULT)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: ScreenshotCaptureException) {
+            throw e
         } catch (e: Exception) {
             Logger.e(TAG, "Failed to capture screenshot to bytes", e)
             null
         } finally {
             // Clean up temp files
             try {
-                userService.executeCommand("rm -f $pngFile $base64File")
+                withContext(NonCancellable) {
+                    screenshotCommand("CLEANUP", listOf("rm", "-f", pngFile, base64File), 1000)
+                }
             } catch (_: Exception) {
                 // Ignore cleanup errors
             }
         }
+    }
+
+    private suspend fun screenshotCommand(phase: String, argv: List<String>, timeoutMs: Long): String {
+        Logger.d(TAG, "Screenshot IPC phase=$phase started")
+        val started = System.nanoTime()
+        val result = try {
+            screenshotCommands.execute(timeoutMs + 1000) {
+                commandClient.executeArgsBlocking(argv, timeoutMs)
+            }
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: ScreenshotCaptureException) {
+            Logger.w(TAG, "Screenshot IPC phase=$phase stopped at deadline or busy gate")
+            throw error
+        } catch (_: Exception) {
+            throw ScreenshotCaptureException("截图设备连接已失效，任务已停止；请检查 Shizuku 后重试")
+        }
+        requireSuccessfulScreenshotCommand(result)
+        Logger.d(TAG, "Screenshot IPC phase=$phase completed in ${(System.nanoTime() - started) / 1_000_000}ms")
+        return result.stdout
     }
 
     /**
@@ -389,11 +405,8 @@ class ScreenshotService(
     private fun createFallbackScreenshot(): Screenshot {
         val bitmap = Bitmap.createBitmap(FALLBACK_WIDTH, FALLBACK_HEIGHT, Bitmap.Config.ARGB_8888)
 
-        val outputStream = ByteArrayOutputStream()
-        bitmap.compress(WEBP_FORMAT, WEBP_QUALITY, outputStream)
-        bitmap.recycle()
-
-        val base64Data = Base64.encodeToString(outputStream.toByteArray(), Base64.NO_WRAP)
+        val data = try { ScreenshotCompression.encode(bitmap) } finally { bitmap.recycle() }
+        val base64Data = Base64.encodeToString(data, Base64.NO_WRAP)
 
         return Screenshot(
             base64Data = base64Data,
@@ -439,8 +452,8 @@ class ScreenshotService(
      * Encodes a Bitmap to base64 string.
      *
      * @param bitmap Bitmap to encode
-     * @param format Compression format (default: WEBP_LOSSY)
-     * @param quality Compression quality 0-100 (default: WEBP_QUALITY)
+     * @param format Explicit compression override; the default chooses the smaller lossless encoding.
+     * @param quality Explicit codec setting; lossless WebP uses this as effort rather than visual quality.
      * @return Base64-encoded string of the compressed image
      *
      */
@@ -449,8 +462,12 @@ class ScreenshotService(
         format: Bitmap.CompressFormat = WEBP_FORMAT,
         quality: Int = WEBP_QUALITY,
     ): String {
+        if (format == WEBP_FORMAT && quality == WEBP_QUALITY) {
+            return encodeToBase64(ScreenshotCompression.encode(bitmap))
+        }
         val outputStream = ByteArrayOutputStream()
-        bitmap.compress(format, quality, outputStream)
+        check(bitmap.compress(format, quality, outputStream)) { "Unable to encode screenshot" }
+        check(outputStream.size() > 0) { "Screenshot encoder returned no image data" }
         return encodeToBase64(outputStream.toByteArray())
     }
 

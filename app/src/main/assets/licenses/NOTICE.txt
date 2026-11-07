@@ -1,0 +1,9 @@
+PhonePilot is based on AutoGLM-For-Android by Luokavin, MIT licensed.
+Upstream: https://github.com/Luokavin/AutoGLM-For-Android
+
+Bundled independent proxy executable: Mihomo v1.19.33, MetaCubeX, GPL-3.0.
+License: mihomo-GPL-3.0.txt
+Exact corresponding source: https://github.com/MetaCubeX/mihomo/tree/v1.19.33
+Release and official Android executable:
+https://github.com/MetaCubeX/mihomo/releases/tag/v1.19.33
+The application communicates with this separate process over authenticated local HTTP proxy.

@@ -10,9 +10,16 @@ import android.util.Base64
 import android.view.View
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
+import android.view.inputmethod.InputConnection
 import android.widget.ImageButton
 import com.kevinluo.autoglm.R
 import com.kevinluo.autoglm.util.Logger
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
 
 /**
  * Built-in Input Method Service for AutoGLM text input.
@@ -39,6 +46,9 @@ import com.kevinluo.autoglm.util.Logger
  *
  */
 class AutoGLMKeyboardService : InputMethodService() {
+    private val inputScope by lazy { CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate) }
+    private var editorToken: KeyboardEditorToken? = null
+    private var publishedConnection: InputConnection? = null
     /**
      * BroadcastReceiver for handling text input commands.
      *
@@ -50,18 +60,17 @@ class AutoGLMKeyboardService : InputMethodService() {
             override fun onReceive(context: Context, intent: Intent) {
                 Logger.d(TAG, "Received broadcast: ${intent.action}")
 
-                when (intent.action) {
-                    ACTION_INPUT_TEXT, ACTION_INPUT_B64 -> {
-                        handleInputText(intent)
-                    }
-
-                    ACTION_CLEAR_TEXT -> {
-                        handleClearText()
-                    }
-
-                    ACTION_INPUT_CHARS -> {
-                        handleInputChars(intent)
-                    }
+                val pending = goAsync()
+                pending.setResultCode(android.app.Activity.RESULT_CANCELED)
+                inputScope.launch {
+                    try {
+                        val result = handleLegacyCommand(intent)
+                        pending.setResultCode(if (result.success) android.app.Activity.RESULT_OK else android.app.Activity.RESULT_CANCELED)
+                    } catch (error: CancellationException) {
+                        throw error
+                    } catch (_: Exception) {
+                        Logger.w(TAG, "Keyboard broadcast request failed")
+                    } finally { pending.finish() }
                 }
             }
         }
@@ -80,6 +89,8 @@ class AutoGLMKeyboardService : InputMethodService() {
 
     override fun onDestroy() {
         Logger.i(TAG, "AutoGLMKeyboardService destroyed")
+        releaseEditor()
+        inputScope.cancel()
         unregisterInputReceiver()
         super.onDestroy()
     }
@@ -176,6 +187,7 @@ class AutoGLMKeyboardService : InputMethodService() {
     override fun onStartInput(attribute: EditorInfo?, restarting: Boolean) {
         super.onStartInput(attribute, restarting)
         Logger.d(TAG, "onStartInput: restarting=$restarting, editorType=${attribute?.inputType}")
+        publishEditor(forceNew = true)
     }
 
     /**
@@ -189,6 +201,7 @@ class AutoGLMKeyboardService : InputMethodService() {
     override fun onStartInputView(info: EditorInfo?, restarting: Boolean) {
         super.onStartInputView(info, restarting)
         Logger.d(TAG, "onStartInputView: restarting=$restarting")
+        publishEditor(forceNew = false)
 
         // Ensure receiver is registered
         registerInputReceiver()
@@ -205,12 +218,14 @@ class AutoGLMKeyboardService : InputMethodService() {
     override fun onFinishInputView(finishingInput: Boolean) {
         super.onFinishInputView(finishingInput)
         Logger.d(TAG, "onFinishInputView: finishingInput=$finishingInput")
+        if (finishingInput) releaseEditor()
     }
 
     /**
      * Called when input is finished.
      */
     override fun onFinishInput() {
+        releaseEditor()
         super.onFinishInput()
         Logger.d(TAG, "onFinishInput")
     }
@@ -265,94 +280,38 @@ class AutoGLMKeyboardService : InputMethodService() {
         }
     }
 
-    /**
-     * Handles Base64-encoded text input broadcast.
-     *
-     * Decodes the Base64 text and commits it to the current input connection.
-     *
-     * @param intent The broadcast intent containing the encoded text
-     */
-    private fun handleInputText(intent: Intent) {
-        val encodedText =
-            intent.getStringExtra(EXTRA_MSG) ?: run {
-                Logger.w(TAG, "No text in input broadcast")
-                return
-            }
-
-        try {
-            val decodedBytes = Base64.decode(encodedText, Base64.DEFAULT)
-            val text = String(decodedBytes, Charsets.UTF_8)
-            Logger.d(TAG, "Decoded text: '${text.take(50)}${if (text.length > 50) "..." else ""}'")
-
-            commitText(text)
-        } catch (e: Exception) {
-            Logger.e(TAG, "Failed to decode Base64 text", e)
+    private fun publishEditor(forceNew: Boolean) {
+        val connection = currentInputConnection
+        if (!forceNew && connection === publishedConnection && editorToken != null) return
+        releaseEditor()
+        if (connection != null) {
+            publishedConnection = connection
+            editorToken = KeyboardInputGateway.gateway.activate(this, InputConnectionEditor(connection))
         }
     }
 
-    /**
-     * Handles direct text input broadcast (without encoding).
-     *
-     * @param intent The broadcast intent containing the text
-     */
-    private fun handleInputChars(intent: Intent) {
-        val text =
-            intent.getStringExtra(EXTRA_MSG) ?: run {
-                Logger.w(TAG, "No text in input chars broadcast")
-                return
-            }
-
-        Logger.d(TAG, "Input chars: '${text.take(50)}${if (text.length > 50) "..." else ""}'")
-        commitText(text)
+    private fun releaseEditor() {
+        KeyboardInputGateway.gateway.deactivate(this, editorToken)
+        editorToken = null
+        publishedConnection = null
     }
 
-    /**
-     * Handles clear text broadcast.
-     *
-     * Selects all text in the current input field and deletes it.
-     */
-    private fun handleClearText() {
-        Logger.d(TAG, "Clearing text")
-
-        val ic =
-            currentInputConnection ?: run {
-                Logger.w(TAG, "No input connection for clear text")
-                return
+    /** Legacy broadcasts and in-app typing share exactly the same validated edit sequence. */
+    private suspend fun handleLegacyCommand(intent: Intent): InputResult {
+        val token = KeyboardInputGateway.gateway.currentToken()
+            ?: return InputResult.failure("没有活动输入框")
+        val text = when (intent.action) {
+            ACTION_CLEAR_TEXT -> ""
+            ACTION_INPUT_CHARS -> intent.getStringExtra(EXTRA_MSG)
+                ?: return InputResult.failure("缺少输入文字")
+            ACTION_INPUT_TEXT, ACTION_INPUT_B64 -> {
+                val encoded = intent.getStringExtra(EXTRA_MSG) ?: return InputResult.failure("缺少输入文字")
+                String(Base64.decode(encoded, Base64.DEFAULT), Charsets.UTF_8)
             }
-
-        try {
-            // Perform select all
-            ic.performContextMenuAction(android.R.id.selectAll)
-
-            // Delete selected text by committing empty string
-            ic.commitText("", 0)
-
-            Logger.d(TAG, "Text cleared successfully")
-        } catch (e: Exception) {
-            Logger.e(TAG, "Failed to clear text", e)
+            else -> return InputResult.failure("未知输入请求")
         }
+        return KeyboardInputGateway.gateway.input(token, text, replace = intent.action == ACTION_CLEAR_TEXT)
     }
-
-    /**
-     * Commits text to the current input connection.
-     *
-     * @param text The text to commit
-     */
-    private fun commitText(text: String) {
-        val ic =
-            currentInputConnection ?: run {
-                Logger.w(TAG, "No input connection for commit text")
-                return
-            }
-
-        try {
-            ic.commitText(text, 1)
-            Logger.d(TAG, "Text committed successfully")
-        } catch (e: Exception) {
-            Logger.e(TAG, "Failed to commit text", e)
-        }
-    }
-
     companion object {
         private const val TAG = "AutoGLMKeyboard"
 

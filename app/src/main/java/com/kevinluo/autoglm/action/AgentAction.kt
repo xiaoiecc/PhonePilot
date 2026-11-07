@@ -4,7 +4,7 @@ package com.kevinluo.autoglm.action
  * Sealed class hierarchy representing all possible agent actions.
  *
  * These actions are parsed from the AutoGLM model responses and executed
- * by [ActionHandler]. Each action type represents a specific device operation
+ * as history metadata. These values have no executable dispatcher; device operations
  * or control flow command.
  *
  * The sealed class pattern ensures exhaustive handling of all action types

@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="overlay_token_usage">总输入 %1$s · 总输出 %2$s</string>
+    <string name="overlay_token_usage_unknown">总输入 — · 总输出 —</string>
+    <string name="overlay_notification_channel">手机助手悬浮窗</string>
+    <string name="overlay_notification_title">手机助手正在运行</string>
+    <string name="overlay_notification_body">点击打开对话，可在悬浮窗中暂停或停止操作</string>
+</resources>

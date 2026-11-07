@@ -1,11 +1,17 @@
 {
   "profiles": [
     {
-      "name": "本地 Ollama",
-      "baseUrl": "http://127.0.0.1:11434/v1",
-      "modelName": "qwen2.5:7b",
+      "name": "OpenAI · GPT-6.1 Sol",
+      "baseUrl": "https://api.openai.com/v1",
+      "modelName": "gpt-6.1-sol",
+      "apiKey": ""
+    },
+    {
+      "name": "OpenAI · GPT-6.1 Terra",
+      "baseUrl": "https://api.openai.com/v1",
+      "modelName": "gpt-6.1-terra",
       "apiKey": ""
     }
   ],
-  "defaultProfile": "本地 Ollama"
+  "defaultProfile": "OpenAI · GPT-6.1 Sol"
 }

@@ -132,7 +132,7 @@ class HistoryFragment : Fragment() {
             HistoryListAdapter(
                 onItemClick = { task ->
                     if (isSelectionMode) {
-                        adapter.toggleSelection(task.id)
+                        adapter.toggleSelection(task.conversationId)
                     } else {
                         openTaskDetail(task)
                     }
@@ -140,7 +140,7 @@ class HistoryFragment : Fragment() {
                 onItemLongClick = { task ->
                     if (!isSelectionMode) {
                         enterSelectionMode()
-                        adapter.toggleSelection(task.id)
+                        adapter.toggleSelection(task.conversationId)
                     }
                 },
                 onSelectionChanged = { count ->
@@ -161,7 +161,7 @@ class HistoryFragment : Fragment() {
     private fun observeHistory() {
         viewLifecycleOwner.lifecycleScope.launch {
             historyManager.historyList.collectLatest { list ->
-                adapter.submitList(list)
+                adapter.submitList(ConversationHistory.summaries(list))
                 updateEmptyState(list.isEmpty())
 
                 // Exit selection mode if list becomes empty
@@ -230,10 +230,10 @@ class HistoryFragment : Fragment() {
      *
      * @param task Task history to display details for
      */
-    private fun openTaskDetail(task: TaskHistory) {
-        Logger.d(TAG, "Opening task detail: ${task.id}")
+    private fun openTaskDetail(task: ConversationSummary) {
+        Logger.d(TAG, "Opening task detail: ${task.conversationId}")
         val intent = Intent(requireContext(), HistoryDetailActivity::class.java)
-        intent.putExtra(HistoryDetailActivity.EXTRA_TASK_ID, task.id)
+        intent.putExtra(HistoryDetailActivity.EXTRA_CONVERSATION_ID, task.conversationId)
         startActivity(intent)
     }
 
@@ -249,7 +249,7 @@ class HistoryFragment : Fragment() {
             .setMessage(getString(R.string.history_delete_selected_confirm, selectedIds.size))
             .setPositiveButton(R.string.dialog_confirm) { _, _ ->
                 viewLifecycleOwner.lifecycleScope.launch {
-                    historyManager.deleteTasks(selectedIds)
+                    historyManager.deleteConversations(selectedIds)
                     exitSelectionMode()
                 }
             }
@@ -290,11 +290,11 @@ class HistoryFragment : Fragment() {
  * @param onSelectionChanged Callback invoked when selection count changes
  */
 class HistoryListAdapter(
-    private val onItemClick: (TaskHistory) -> Unit,
-    private val onItemLongClick: (TaskHistory) -> Unit,
+    private val onItemClick: (ConversationSummary) -> Unit,
+    private val onItemLongClick: (ConversationSummary) -> Unit,
     private val onSelectionChanged: (Int) -> Unit,
 ) : RecyclerView.Adapter<HistoryListAdapter.ViewHolder>() {
-    private var items: List<TaskHistory> = emptyList()
+    private var items: List<ConversationSummary> = emptyList()
     private val selectedIds = mutableSetOf<String>()
     private var isSelectionMode = false
     private val dateFormat = SimpleDateFormat("MM-dd HH:mm", Locale.getDefault())
@@ -304,10 +304,10 @@ class HistoryListAdapter(
      *
      * @param list New list of task histories
      */
-    fun submitList(list: List<TaskHistory>) {
+    fun submitList(list: List<ConversationSummary>) {
         items = list
         // Remove selected IDs that no longer exist
-        selectedIds.retainAll(list.map { it.id }.toSet())
+        selectedIds.retainAll(list.map { it.conversationId }.toSet())
         notifyDataSetChanged()
     }
 
@@ -341,7 +341,7 @@ class HistoryListAdapter(
      */
     fun selectAll() {
         selectedIds.clear()
-        selectedIds.addAll(items.map { it.id })
+        selectedIds.addAll(items.map { it.conversationId })
         notifyDataSetChanged()
         onSelectionChanged(selectedIds.size)
     }
@@ -394,14 +394,14 @@ class HistoryListAdapter(
          *
          * @param task Task history to display
          */
-        fun bind(task: TaskHistory) {
-            taskDescription.text = task.taskDescription
-            timeText.text = dateFormat.format(Date(task.startTime))
+        fun bind(task: ConversationSummary) {
+            taskDescription.text = task.title
+            timeText.text = dateFormat.format(Date(task.lastActivityTime))
             stepsText.text = itemView.context.getString(R.string.history_steps_format, task.stepCount)
             durationText.text =
                 itemView.context.getString(
                     R.string.history_duration_format,
-                    formatDuration(task.duration),
+                    formatDuration(task.executionDurationMs),
                 )
 
             if (task.success) {
@@ -418,10 +418,10 @@ class HistoryListAdapter(
 
             // Handle selection mode
             checkBox.visibility = if (isSelectionMode) View.VISIBLE else View.GONE
-            checkBox.isChecked = selectedIds.contains(task.id)
+            checkBox.isChecked = selectedIds.contains(task.conversationId)
 
             checkBox.setOnClickListener {
-                toggleSelection(task.id)
+                toggleSelection(task.conversationId)
             }
 
             itemView.setOnClickListener { onItemClick(task) }

@@ -162,9 +162,10 @@ class SettingsFragmentPropertyTest :
 
         "wake words should persist correctly" {
             checkAll(100, Arb.string(1, 20), Arb.string(1, 20)) { word1, word2 ->
-                // Trim inputs and filter out commas (comma is the delimiter)
-                val trimmedWord1 = word1.trim().replace(",", "")
-                val trimmedWord2 = word2.trim().replace(",", "")
+                // Removing delimiters may expose trailing whitespace (e.g. "name ,").
+                // Generate canonical words after removal, just like the settings editor.
+                val trimmedWord1 = word1.replace(",", "").trim()
+                val trimmedWord2 = word2.replace(",", "").trim()
                 val wakeWords = listOf(trimmedWord1, trimmedWord2).filter { it.isNotEmpty() }
 
                 val savedWords = wakeWords.joinToString(",")

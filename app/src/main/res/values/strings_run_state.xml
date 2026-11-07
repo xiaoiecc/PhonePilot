@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="task_status_cancelling">正在停止…</string>
+</resources>

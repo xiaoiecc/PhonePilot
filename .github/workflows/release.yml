@@ -1,9 +1,13 @@
-name: Build and Release APK
+name: PhonePilot checks
 
 on:
+  workflow_dispatch:
+  pull_request:
   push:
-    tags:
-      - 'v*'
+    branches: [main]
+
+permissions:
+  contents: read
 
 jobs:
   build:
@@ -12,36 +16,40 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     
-    - name: Set up JDK 17
+    - name: Set up JDK 21
       uses: actions/setup-java@v4
       with:
-        java-version: '17'
+        java-version: '21'
         distribution: 'temurin'
         cache: gradle
     
-    - name: Grant execute permission for gradlew
-      run: chmod +x gradlew
-    
-    - name: Decode Keystore
-      run: |
-        echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > app/release.keystore
-    
-    - name: Build Release APK
-      run: ./gradlew assembleRelease
-      env:
-        KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
-        KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
-        KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
-    
-    - name: Get version name
-      id: version
-      run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
-    
-    - name: Create Release
-      uses: softprops/action-gh-release@v1
+    - name: Set up Android SDK
+      uses: android-actions/setup-android@v3
+
+    - name: Install compile platform and build tools
+      run: sdkmanager "platforms;android-35" "build-tools;36.0.0"
+
+    - name: Fetch and verify the pinned Mihomo executable
+      shell: pwsh
+      run: ./scripts/fetch-mihomo.ps1
+
+    - name: Run tests, architecture checks, build and lint
+      run: bash ./gradlew :automation-core:test :app:testDebugUnitTest :app:assembleDebug :app:lintDebug --no-daemon
+
+    - name: Upload test reports
+      if: always()
+      uses: actions/upload-artifact@v4
       with:
-        name: AutoGLM For Android ${{ steps.version.outputs.VERSION }}
-        files: app/build/outputs/apk/release/*.apk
-        generate_release_notes: true
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        name: PhonePilot-check-reports
+        path: |
+          automation-core/build/reports/tests/
+          app/build/reports/tests/
+          app/build/reports/lint-results-debug.*
+        if-no-files-found: ignore
+
+    - name: Upload CI debug APK
+      uses: actions/upload-artifact@v4
+      with:
+        name: PhonePilot-debug
+        path: app/build/outputs/apk/debug/*.apk
+        retention-days: 7

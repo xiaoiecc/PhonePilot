@@ -42,14 +42,15 @@ import kotlin.coroutines.resume
  *
  */
 data class ModelConfig(
-    val baseUrl: String = "https://open.bigmodel.cn/api/paas/v4",
+    val baseUrl: String = "https://api.openai.com/v1",
     val apiKey: String = "EMPTY",
-    val modelName: String = "autoglm-phone",
-    val maxTokens: Int = 3000,
+    val modelName: String = "gpt-6.1-terra",
+    val maxTokens: Int = 8192,
     val temperature: Float = 0.0f,
     val topP: Float = 0.85f,
     val frequencyPenalty: Float = 0.2f,
     val timeoutSeconds: Long = 120,
+    val reasoningEffort: String = "medium",
 )
 
 /**

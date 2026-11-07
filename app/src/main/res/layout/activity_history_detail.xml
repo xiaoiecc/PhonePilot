@@ -76,9 +76,37 @@
     <androidx.recyclerview.widget.RecyclerView
         android:id="@+id/contentRecyclerView"
         android:layout_width="match_parent"
-        android:layout_height="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
         android:clipToPadding="false"
         android:paddingHorizontal="16dp"
         android:paddingBottom="32dp" />
+
+    <LinearLayout
+        android:id="@+id/sessionDetailActions"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:paddingHorizontal="12dp"
+        android:paddingBottom="16dp">
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/viewConversationBtn"
+            style="@style/Widget.App.Button.Text"
+            android:layout_width="0dp"
+            android:layout_height="48dp"
+            android:layout_weight="1"
+            android:enabled="false"
+            android:text="@string/session_messages" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/resumeConversationBtn"
+            android:layout_width="0dp"
+            android:layout_height="48dp"
+            android:layout_marginStart="8dp"
+            android:layout_weight="1"
+            android:enabled="false"
+            android:text="@string/session_continue" />
+    </LinearLayout>
 
 </LinearLayout>

@@ -22,3 +22,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "AutoGLM for Android"
 include(":app")
+include(":automation-core")

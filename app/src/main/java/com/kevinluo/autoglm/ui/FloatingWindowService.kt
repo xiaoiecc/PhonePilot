@@ -1,6 +1,10 @@
 package com.kevinluo.autoglm.ui
 
 import android.app.Service
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.content.pm.ServiceInfo
 import android.content.Context
 import android.content.Intent
 import android.graphics.PixelFormat
@@ -12,7 +16,6 @@ import android.view.Gravity
 import android.view.LayoutInflater
 import android.view.MotionEvent
 import android.view.View
-import android.view.ViewGroup
 import android.view.WindowManager
 import android.view.inputmethod.InputMethodManager
 import android.widget.EditText
@@ -21,21 +24,25 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
 import androidx.core.content.ContextCompat
+import androidx.core.app.NotificationCompat
+import androidx.core.app.ServiceCompat
+import androidx.core.widget.doAfterTextChanged
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.google.android.material.button.MaterialButton
 import com.kevinluo.autoglm.MainActivity
 import com.kevinluo.autoglm.R
-import com.kevinluo.autoglm.action.AgentAction
-import com.kevinluo.autoglm.screenshot.FloatingWindowController
+import com.kevinluo.autoglm.home.ChatMessageAdapter
+import com.kevinluo.autoglm.core.PendingInteraction
+import com.kevinluo.autoglm.core.InteractionKind
+import com.kevinluo.autoglm.core.InteractionReply
 import com.kevinluo.autoglm.task.TaskExecutionManager
-import com.kevinluo.autoglm.task.TaskStep
+import com.kevinluo.autoglm.screenshot.ScopedFloatingWindowController
 import com.kevinluo.autoglm.util.Logger
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -55,6 +62,9 @@ enum class TaskStatus {
     /** Task execution has been paused by the user. */
     PAUSED,
 
+    /** Stop has been requested; the prior run still owns cleanup. */
+    CANCELLING,
+
     /** Task has completed successfully. */
     COMPLETED,
 
@@ -66,57 +76,34 @@ enum class TaskStatus {
 
     /** Waiting for user to take over control. */
     WAITING_TAKEOVER,
+
+    /** Waiting for a free-form user reply. */
+    WAITING_FOR_USER,
 }
 
-/**
- * Data class representing a single step in the floating window waterfall display.
- *
- * @property stepNumber The sequential number of this step in the task execution
- * @property thinking The model's reasoning/thinking text for this step
- * @property action The action being performed in this step
- *
- */
-data class FloatingStep(val stepNumber: Int, val thinking: String, val action: String)
-
-/**
- * Foreground service that manages the floating window overlay for task execution.
- *
- * This service provides a floating window interface that allows users to:
- * - Input and start new tasks
- * - View real-time task execution progress in a waterfall-style display
- * - Control task execution (pause, resume, stop)
- * - See task completion status and results
- *
- * The floating window can be dragged, minimized, and hidden/shown as needed.
- * It implements [FloatingWindowController] to allow other components to control
- * the window visibility.
- *
- */
+/** Read-only task/chat renderer and Android window host; user gestures submit facade commands. */
 class FloatingWindowService :
     Service(),
-    FloatingWindowController {
+    ScopedFloatingWindowController {
     private var windowManager: WindowManager? = null
     private var floatingView: View? = null
     private var layoutParams: WindowManager.LayoutParams? = null
 
     private var isAttached = AtomicBoolean(false)
-    private var isMinimized = false
-    private var currentStepNumber = 0
-    private var currentStatus = TaskStatus.IDLE
+    private var lastInteractionKey: Pair<String, Long>? = null
 
     // Coroutine scope for UI operations - uses SupervisorJob so child failures don't cancel siblings
-    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
-    // Steps list for waterfall display
-    private val stepsList = mutableListOf<FloatingStep>()
-    private var stepsAdapter: StepsAdapter? = null
+    // Conversation presentation only; task execution belongs to the coordinator.
+    private val chatAdapter = ChatMessageAdapter()
 
     companion object {
         private const val TAG = "FloatingWindow"
 
         // Window size as percentage of screen
         private const val WIDTH_PERCENT = 0.80f
-        private const val HEIGHT_PERCENT = 0.50f
+        private const val HEIGHT_PERCENT = 0.70f
 
         @Volatile
         private var instance: FloatingWindowService? = null
@@ -140,6 +127,7 @@ class FloatingWindowService :
         super.onCreate()
         instance = this
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
+        FloatingWindowStateManager.initialize(applicationContext)
         Logger.d(TAG, "Service created")
         observeTaskState()
     }
@@ -151,49 +139,43 @@ class FloatingWindowService :
      * These coroutines are cancelled in onDestroy when serviceScope is cancelled.
      */
     private fun observeTaskState() {
-        // Observe task state changes
         serviceScope.launch {
-            TaskExecutionManager.taskState.collect { state ->
-                Logger.d(TAG, "TaskState changed: status=${state.status}, step=${state.stepNumber}")
-                updateUIFromTaskState(state)
+            TaskExecutionManager.messages.collect { messages ->
+                val list = floatingView?.findViewById<RecyclerView>(R.id.steps_recycler_view)
+                val follow = list?.canScrollVertically(1) != true
+                chatAdapter.submitMessages(messages)
+                if (messages.isNotEmpty() && !FloatingWindowStateManager.snapshot.value.minimized) list?.visibility = View.VISIBLE
+                if (follow && messages.isNotEmpty()) list?.scrollToPosition(messages.lastIndex)
             }
         }
-
-        // Observe steps changes
+        serviceScope.launch { TaskExecutionManager.taskState.collect { updateUIFromTaskState(it) } }
+        serviceScope.launch { TaskExecutionManager.pendingInteraction.collect { renderInteraction(it) } }
         serviceScope.launch {
-            TaskExecutionManager.steps.collect { steps ->
-                Logger.d(TAG, "Steps changed: count=${steps.size}")
-                updateStepsFromTaskManager(steps)
+            TaskExecutionManager.activeWait.collect { active ->
+                floatingView?.findViewById<MaterialButton>(R.id.btn_finish_wait)?.visibility =
+                    if (active == null || FloatingWindowStateManager.snapshot.value.minimized) View.GONE else View.VISIBLE
             }
         }
     }
-
     /**
      * Updates the UI based on TaskExecutionState from TaskExecutionManager.
      *
      * @param state The current task execution state
      */
     private fun updateUIFromTaskState(state: com.kevinluo.autoglm.task.TaskExecutionState) {
-        // Update status
-        if (currentStatus != state.status) {
-            currentStatus = state.status
-            updateStatusIndicator(state.status)
-            updateUIForStatus(state.status)
-        }
-
-        // Update step number
-        if (currentStepNumber != state.stepNumber) {
-            currentStepNumber = state.stepNumber
-            floatingView?.findViewById<TextView>(R.id.tv_step_counter)?.text =
-                getString(R.string.step_counter_format, state.stepNumber)
-        }
-
-        // Update result message for completed/failed states
-        if (state.status == TaskStatus.COMPLETED || state.status == TaskStatus.FAILED) {
-            showResult(state.resultMessage, state.status == TaskStatus.COMPLETED)
-        }
+        val view = floatingView ?: return
+        view.findViewById<MaterialButton>(R.id.btn_new_task)?.isEnabled = !state.isExecuting
+        view.findViewById<MaterialButton>(R.id.btn_start)?.isEnabled = state.status != TaskStatus.CANCELLING
+        view.findViewById<MaterialButton>(R.id.btn_stop)?.isEnabled = state.status != TaskStatus.CANCELLING
+        view.findViewById<TextView>(R.id.token_usage)?.text = getString(
+            R.string.overlay_token_usage, formatTokenCount(state.totalInputTokens), formatTokenCount(state.totalOutputTokens),
+        )
+        updateStatusIndicator(state.status)
+        updateUIForStatus(state.status)
+        view.findViewById<TextView>(R.id.tv_step_counter)?.text = getString(R.string.step_counter_format, state.stepNumber)
+        showResult(state.resultMessage, state.status)
+        applyMinimizedPresentation(FloatingWindowStateManager.snapshot.value.minimized)
     }
-
     /**
      * Updates the status indicator UI elements.
      *
@@ -209,10 +191,11 @@ class FloatingWindowService :
                     TaskStatus.IDLE -> R.string.task_status_idle to R.color.status_idle
                     TaskStatus.RUNNING -> R.string.task_status_running to R.color.status_running
                     TaskStatus.PAUSED -> R.string.task_status_paused to R.color.status_paused
+                    TaskStatus.CANCELLING -> R.string.task_status_cancelling to R.color.status_waiting
                     TaskStatus.COMPLETED -> R.string.task_status_completed to R.color.status_completed
                     TaskStatus.FAILED -> R.string.task_status_failed to R.color.status_failed
                     TaskStatus.WAITING_CONFIRMATION -> R.string.floating_waiting_confirm to R.color.status_waiting
-                    TaskStatus.WAITING_TAKEOVER -> R.string.takeover_title to R.color.status_waiting
+                    TaskStatus.WAITING_TAKEOVER, TaskStatus.WAITING_FOR_USER -> R.string.takeover_title to R.color.status_waiting
                 }
 
             statusText?.text = getString(textRes)
@@ -231,39 +214,33 @@ class FloatingWindowService :
      *
      * @param steps The list of task steps from TaskExecutionManager
      */
-    private fun updateStepsFromTaskManager(steps: List<TaskStep>) {
-        // Clear and rebuild the local steps list
-        stepsList.clear()
-        steps.forEach { step ->
-            stepsList.add(
-                FloatingStep(
-                    stepNumber = step.stepNumber,
-                    thinking = step.thinking,
-                    action = step.action,
-                ),
-            )
-        }
-        stepsAdapter?.notifyDataSetChanged()
-
-        // Scroll to bottom if there are steps
-        if (stepsList.isNotEmpty()) {
-            floatingView?.findViewById<RecyclerView>(R.id.steps_recycler_view)?.let { rv ->
-                rv.scrollToPosition(stepsList.size - 1)
-            }
-        }
-    }
-
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        // 不再使用前台服务，悬浮窗本身就能保持显示
-        // 如果需要保活，依赖 ContinuousListeningService 的前台通知
-
-        // Only create the window view, don't show it automatically
-        // Window will be shown when show() is called explicitly
+        startOverlayForeground()
         if (floatingView == null && canDrawOverlays(this)) {
             createWindowView()
         }
-
+        // START_STICKY does not replay the old show() call after service recreation.
+        if (FloatingWindowStateManager.shouldBeVisible()) show()
         return START_STICKY
+    }
+
+    private fun startOverlayForeground() {
+        val channel = "automation_overlay"
+        if (Build.VERSION.SDK_INT >= 26) {
+            getSystemService(NotificationManager::class.java).createNotificationChannel(
+                NotificationChannel(channel, getString(R.string.overlay_notification_channel), NotificationManager.IMPORTANCE_LOW),
+            )
+        }
+        val open = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+        val notification = NotificationCompat.Builder(this, channel)
+            .setSmallIcon(R.drawable.ic_layers)
+            .setContentTitle(getString(R.string.overlay_notification_title))
+            .setContentText(getString(R.string.overlay_notification_body))
+            .setContentIntent(open).setOngoing(true).setOnlyAlertOnce(true)
+            .setPriority(NotificationCompat.PRIORITY_LOW).build()
+        ServiceCompat.startForeground(this, 2003, notification,
+            if (Build.VERSION.SDK_INT >= 34) ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE else 0)
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -296,17 +273,18 @@ class FloatingWindowService :
         }
     }
 
+    override fun acquireHidden(): AutoCloseable = FloatingWindowStateManager.acquireHide(applicationContext)
+    override fun acquirePauseVisibility(): AutoCloseable = FloatingWindowStateManager.acquirePauseVisibility(applicationContext)
+
     /**
      * Clears input focus and hides keyboard.
      *
      * After clearing focus, adds FLAG_NOT_FOCUSABLE so back key works in other apps.
      */
     private fun clearInputFocus() {
-        val taskInput = floatingView?.findViewById<EditText>(R.id.task_input) ?: return
-
-        if (!taskInput.hasFocus()) {
-            return
-        }
+        val taskInput = floatingView?.findViewById<EditText>(R.id.task_input)?.takeIf { it.hasFocus() }
+            ?: floatingView?.findViewById<EditText>(R.id.et_interaction_answer)?.takeIf { it.hasFocus() }
+            ?: return
 
         Logger.d(TAG, "clearInputFocus: clearing focus and hiding keyboard")
 
@@ -339,6 +317,7 @@ class FloatingWindowService :
      */
     override fun show() {
         serviceScope.launch {
+            if (!FloatingWindowStateManager.shouldBeVisible()) return@launch
             Logger.d(TAG, "show() called, isAttached=${isAttached.get()}, floatingView=${floatingView != null}")
 
             // Create window view if not created yet
@@ -360,6 +339,7 @@ class FloatingWindowService :
      */
     override fun showAndBringToFront() {
         serviceScope.launch {
+            if (!FloatingWindowStateManager.shouldBeVisible()) return@launch
             val attached = isAttached.get()
             val hasView = floatingView != null
             Logger.d(TAG, "showAndBringToFront() called, isAttached=$attached, floatingView=$hasView")
@@ -386,248 +366,82 @@ class FloatingWindowService :
      */
     override fun isVisible(): Boolean = isAttached.get()
 
-    // ==================== Public Methods ====================
-
-    /**
-     * Adds a new step to the waterfall display.
-     *
-     * @param stepNumber The sequential number of this step
-     * @param thinking The model's reasoning text for this step
-     * @param action The action being performed, or null if no action
-     *
-     */
-    fun addStep(stepNumber: Int, thinking: String, action: AgentAction?) {
-        serviceScope.launch {
-            val step =
-                FloatingStep(
-                    stepNumber = stepNumber,
-                    thinking = thinking,
-                    action = action?.formatForDisplay() ?: "无",
-                )
-            stepsList.add(step)
-            stepsAdapter?.notifyItemInserted(stepsList.size - 1)
-
-            // Scroll to bottom
-            floatingView?.findViewById<RecyclerView>(R.id.steps_recycler_view)?.let { rv ->
-                rv.scrollToPosition(stepsList.size - 1)
-            }
-
-            // Update step counter
-            currentStepNumber = stepNumber
-            floatingView?.findViewById<TextView>(R.id.tv_step_counter)?.text =
-                getString(R.string.step_counter_format, stepNumber)
+    /** Result text is presentation only; successful answers already appear as chat bubbles. */
+    private fun showResult(message: String, status: TaskStatus) {
+        floatingView?.findViewById<TextView>(R.id.tv_result)?.apply {
+            val failed = status == TaskStatus.FAILED
+            visibility = if (failed && message.isNotBlank()) View.VISIBLE else View.GONE
+            text = if (failed) message else ""
+            setTextColor(ContextCompat.getColor(this@FloatingWindowService, if (status == TaskStatus.COMPLETED) R.color.status_completed else R.color.status_failed))
         }
     }
 
-    /**
-     * Updates the thinking text for the current (last) step.
-     *
-     * @param thinking The new thinking text to display
-     *
-     */
-    fun updateThinking(thinking: String) {
-        serviceScope.launch {
-            if (stepsList.isNotEmpty()) {
-                val lastIndex = stepsList.size - 1
-                stepsList[lastIndex] = stepsList[lastIndex].copy(thinking = thinking)
-                stepsAdapter?.notifyItemChanged(lastIndex)
-            }
+    /** UI owns only listeners and editor contents. The coordinator owns the pending operation. */
+    private fun renderInteraction(pending: PendingInteraction?) {
+        val view = floatingView ?: return
+        val panel = view.findViewById<View>(R.id.interaction_panel)
+        if (pending == null) {
+            if (lastInteractionKey != null) clearInputFocus()
+            lastInteractionKey = null
+            panel.visibility = View.GONE
+            return
         }
-    }
-
-    /**
-     * Updates the action for the current (last) step.
-     *
-     * @param action The new action to display
-     *
-     */
-    fun updateAction(action: AgentAction) {
-        serviceScope.launch {
-            if (stepsList.isNotEmpty()) {
-                val lastIndex = stepsList.size - 1
-                stepsList[lastIndex] = stepsList[lastIndex].copy(action = action.formatForDisplay())
-                stepsAdapter?.notifyItemChanged(lastIndex)
-            }
+        val key = pending.runId to pending.id
+        if (lastInteractionKey == key) {
+            panel.visibility = if (FloatingWindowStateManager.snapshot.value.minimized) View.GONE else View.VISIBLE
+            return
         }
-    }
-
-    /**
-     * Updates the task status and refreshes the UI accordingly.
-     *
-     * This method is private to ensure all status changes go through StateFlow.
-     * Only used internally by showConfirmation/showTakeOver/showInteract for temporary states.
-     *
-     * @param status The new task status to display
-     */
-    private fun updateStatus(status: TaskStatus) {
-        Logger.d(TAG, "updateStatus called with status: $status")
-        serviceScope.launch {
-            Logger.d(TAG, "updateStatus serviceScope.launch executing, status: $status, floatingView: $floatingView")
-            currentStatus = status
-
-            // If switching to RUNNING, clear previous steps
-            if (status == TaskStatus.RUNNING) {
-                stepsList.clear()
-                stepsAdapter?.notifyDataSetChanged()
-                currentStepNumber = 0
-                floatingView?.let { view ->
-                    view.findViewById<TextView>(R.id.tv_result)?.visibility = View.GONE
-                    view.findViewById<TextView>(R.id.tv_step_counter)?.text =
-                        getString(R.string.step_counter_default)
+        lastInteractionKey = key
+        FloatingWindowStateManager.setMinimized(false)
+        view.findViewById<TextView>(R.id.tv_interaction_message).text = pending.prompt
+        val options = view.findViewById<LinearLayout>(R.id.interaction_options)
+        options.removeAllViews()
+        val answer = view.findViewById<EditText>(R.id.et_interaction_answer)
+        answer.visibility = if (pending.kind == InteractionKind.TEXT) View.VISIBLE else View.GONE
+        answer.text.clear()
+        val confirm = view.findViewById<MaterialButton>(R.id.btn_interaction_confirm)
+        confirm.visibility = if (pending.kind == InteractionKind.CHOICE) View.GONE else View.VISIBLE
+        confirm.setText(when (pending.kind) {
+            InteractionKind.TEXT -> R.string.send_reply
+            InteractionKind.TAKEOVER -> R.string.takeover_completed
+            else -> R.string.dialog_confirm
+        })
+        confirm.setOnClickListener {
+            val reply = if (pending.kind == InteractionKind.TEXT) {
+                val text = answer.text.toString().trim()
+                if (text.isBlank()) return@setOnClickListener
+                InteractionReply.Text(text)
+            } else InteractionReply.Accepted(true)
+            TaskExecutionManager.replyInteraction(pending.runId, pending.id, reply)
+        }
+        view.findViewById<MaterialButton>(R.id.btn_interaction_cancel).setOnClickListener {
+            TaskExecutionManager.replyInteraction(pending.runId, pending.id, InteractionReply.Cancelled)
+        }
+        pending.options.forEachIndexed { index, option ->
+            // Match the theme used to inflate the overlay; Service context lacks it.
+            options.addView(MaterialButton(options.context).apply {
+                text = option
+                textSize = 13f
+                setOnClickListener {
+                    TaskExecutionManager.replyInteraction(pending.runId, pending.id, InteractionReply.Choice(index))
+                }
+            })
+        }
+        panel.visibility = View.VISIBLE
+        if (pending.kind == InteractionKind.TEXT) {
+            answer.requestFocus()
+            layoutParams?.let { params ->
+                params.flags = params.flags and WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE.inv()
+                if (isAttached.get()) windowManager?.updateViewLayout(floatingView, params)
+            }
+            answer.post {
+                val current = TaskExecutionManager.pendingInteraction.value
+                if (current?.runId == pending.runId && current.id == pending.id && answer.isAttachedToWindow) {
+                    (getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager).showSoftInput(answer, InputMethodManager.SHOW_IMPLICIT)
                 }
             }
-
-            floatingView?.let { view ->
-                val statusText = view.findViewById<TextView>(R.id.tv_status)
-                val indicator = view.findViewById<View>(R.id.status_indicator)
-
-                val (textRes, colorRes) =
-                    when (status) {
-                        TaskStatus.IDLE -> R.string.task_status_idle to R.color.status_idle
-                        TaskStatus.RUNNING -> R.string.task_status_running to R.color.status_running
-                        TaskStatus.PAUSED -> R.string.task_status_paused to R.color.status_paused
-                        TaskStatus.COMPLETED -> R.string.task_status_completed to R.color.status_completed
-                        TaskStatus.FAILED -> R.string.task_status_failed to R.color.status_failed
-                        TaskStatus.WAITING_CONFIRMATION -> R.string.floating_waiting_confirm to R.color.status_waiting
-                        TaskStatus.WAITING_TAKEOVER -> R.string.takeover_title to R.color.status_waiting
-                    }
-
-                statusText?.text = getString(textRes)
-                indicator?.let {
-                    val drawable =
-                        (it.background as? GradientDrawable)
-                            ?: GradientDrawable().also { d -> it.background = d }
-                    drawable.shape = GradientDrawable.OVAL
-                    drawable.setColor(ContextCompat.getColor(this@FloatingWindowService, colorRes))
-                }
-
-                // Update UI based on status
-                Logger.d(TAG, "updateStatus calling updateUIForStatus with status: $status")
-                updateUIForStatus(status)
-            } ?: Logger.w(TAG, "updateStatus: floatingView is null!")
         }
     }
-
-    /**
-     * Updates the step counter display.
-     *
-     * @param step The current step number to display
-     *
-     */
-    fun updateStepNumber(step: Int) {
-        currentStepNumber = step
-        serviceScope.launch {
-            floatingView?.findViewById<TextView>(R.id.tv_step_counter)?.text =
-                getString(R.string.step_counter_format, step)
-        }
-    }
-
-    /**
-     * Shows a result message in the floating window.
-     *
-     * @param message The result message to display
-     * @param isSuccess Whether the result represents success or failure
-     *
-     */
-    fun showResult(message: String, isSuccess: Boolean) {
-        serviceScope.launch {
-            floatingView?.let { view ->
-                val resultView = view.findViewById<TextView>(R.id.tv_result)
-                resultView?.visibility = View.VISIBLE
-                resultView?.text = message
-                resultView?.setTextColor(
-                    ContextCompat.getColor(
-                        this@FloatingWindowService,
-                        if (isSuccess) R.color.status_completed else R.color.status_failed,
-                    ),
-                )
-            }
-        }
-    }
-
-    /**
-     * Resets the floating window to its initial state.
-     *
-     * Delegates to TaskExecutionManager.resetTask() and the state will be
-     * synchronized through StateFlow. Only UI-specific cleanup (clearing input)
-     * is done here.
-     */
-    fun reset() {
-        serviceScope.launch {
-            Logger.d(TAG, "reset() called - delegating to TaskExecutionManager")
-
-            // Clear task input field (UI-only operation)
-            floatingView?.let { view ->
-                view.findViewById<EditText>(R.id.task_input)?.text?.clear()
-            }
-
-            // Reset task state through TaskExecutionManager
-            // The UI will be updated automatically via StateFlow observation
-            TaskExecutionManager.resetTask()
-
-            Logger.d(TAG, "reset() complete")
-        }
-    }
-
-    /**
-     * Brings the floating window to the front of other windows.
-     *
-     */
-    fun bringToFront() {
-        showAndBringToFront()
-    }
-
-    /**
-     * Shows a confirmation dialog and waits for user response.
-     *
-     * @param message The confirmation message to display
-     * @param callback Function to be called with the user's response (true for confirm, false for cancel)
-     *
-     */
-    fun showConfirmation(message: String, callback: (Boolean) -> Unit) {
-        serviceScope.launch {
-            updateStatus(TaskStatus.WAITING_CONFIRMATION)
-            Logger.d(TAG, "Confirmation requested: $message")
-            delay(100)
-            callback(true)
-            updateStatus(TaskStatus.RUNNING)
-        }
-    }
-
-    /**
-     * Shows a takeover request and waits for user to take control.
-     *
-     * @param message The takeover message to display
-     * @param callback Function to be called when user acknowledges the takeover
-     *
-     */
-    fun showTakeOver(message: String, callback: () -> Unit) {
-        serviceScope.launch {
-            updateStatus(TaskStatus.WAITING_TAKEOVER)
-            Logger.d(TAG, "Takeover requested: $message")
-            delay(100)
-            callback()
-            updateStatus(TaskStatus.RUNNING)
-        }
-    }
-
-    /**
-     * Shows an interaction dialog with multiple options.
-     *
-     * @param options List of option strings to display
-     * @param callback Function to be called with the selected option index (-1 if no options)
-     *
-     */
-    fun showInteract(options: List<String>, callback: (Int) -> Unit) {
-        serviceScope.launch {
-            updateStatus(TaskStatus.WAITING_CONFIRMATION)
-            Logger.d(TAG, "Interact requested with options: $options")
-            delay(100)
-            callback(if (options.isNotEmpty()) 0 else -1)
-            updateStatus(TaskStatus.RUNNING)
-        }
-    }
-
     // ==================== Private Methods ====================
 
     /**
@@ -649,46 +463,61 @@ class FloatingWindowService :
             Logger.d(TAG, "updateUIForStatus: inputArea=$inputArea, stepsRecycler=$stepsRecycler, stopBtn=$stopBtn")
 
             when (status) {
+                TaskStatus.CANCELLING -> {
+                    inputArea?.visibility = View.VISIBLE
+                    stepsRecycler?.visibility = View.VISIBLE
+                    controlButtonsContainer?.visibility = View.VISIBLE
+                    pauseBtn?.visibility = View.GONE
+                    resumeBtn?.visibility = View.GONE
+                    stopBtn?.visibility = View.VISIBLE
+                    stopBtn?.isEnabled = false
+                    newTaskBtn?.visibility = View.GONE
+                    view.findViewById<MaterialButton>(R.id.btn_start)?.isEnabled = false
+                }
                 TaskStatus.IDLE -> {
                     // Show input area, hide steps and control buttons
                     Logger.d(TAG, "updateUIForStatus: Setting IDLE state - show input, hide steps")
                     inputArea?.visibility = View.VISIBLE
-                    stepsRecycler?.visibility = View.GONE
+                    stepsRecycler?.visibility = if (chatAdapter.itemCount > 0) View.VISIBLE else View.GONE
                     controlButtonsContainer?.visibility = View.GONE
                     newTaskBtn?.visibility = View.GONE
+                    view.findViewById<EditText>(R.id.task_input)?.setHint(R.string.task_input_hint)
+                    view.findViewById<MaterialButton>(R.id.btn_start)?.setText(R.string.send_message)
                 }
 
-                TaskStatus.RUNNING, TaskStatus.WAITING_CONFIRMATION, TaskStatus.WAITING_TAKEOVER -> {
-                    // Show steps and control buttons with pause visible
-                    Logger.d(TAG, "updateUIForStatus: Setting RUNNING state - hide input, show steps")
-                    inputArea?.visibility = View.GONE
+                TaskStatus.RUNNING, TaskStatus.WAITING_CONFIRMATION, TaskStatus.WAITING_TAKEOVER, TaskStatus.WAITING_FOR_USER -> {
+                    inputArea?.visibility = View.VISIBLE
                     stepsRecycler?.visibility = View.VISIBLE
                     controlButtonsContainer?.visibility = View.VISIBLE
                     pauseBtn?.visibility = View.VISIBLE
                     resumeBtn?.visibility = View.GONE
                     stopBtn?.visibility = View.VISIBLE
                     newTaskBtn?.visibility = View.GONE
+                    view.findViewById<EditText>(R.id.task_input)?.setHint(R.string.running_message_hint)
+                    view.findViewById<MaterialButton>(R.id.btn_start)?.setText(R.string.send_message)
                 }
 
                 TaskStatus.PAUSED -> {
-                    // Show steps and control buttons with resume visible
-                    Logger.d(TAG, "updateUIForStatus: Setting PAUSED state - show steps and resume button")
-                    inputArea?.visibility = View.GONE
+                    inputArea?.visibility = View.VISIBLE
                     stepsRecycler?.visibility = View.VISIBLE
                     controlButtonsContainer?.visibility = View.VISIBLE
                     pauseBtn?.visibility = View.GONE
                     resumeBtn?.visibility = View.VISIBLE
                     stopBtn?.visibility = View.VISIBLE
                     newTaskBtn?.visibility = View.GONE
+                    view.findViewById<EditText>(R.id.task_input)?.setHint(R.string.running_message_hint)
+                    view.findViewById<MaterialButton>(R.id.btn_start)?.setText(R.string.send_message)
                 }
 
                 TaskStatus.COMPLETED, TaskStatus.FAILED -> {
-                    // Show steps with a "New Task" button to allow starting new task
-                    Logger.d(TAG, "updateUIForStatus: Setting COMPLETED/FAILED state - show steps and new task button")
-                    inputArea?.visibility = View.GONE
+                    // Keep conversation input available and offer a separate new-session action.
+                    inputArea?.visibility = View.VISIBLE
                     stepsRecycler?.visibility = View.VISIBLE
                     controlButtonsContainer?.visibility = View.GONE
                     newTaskBtn?.visibility = View.VISIBLE
+                    newTaskBtn?.setText(R.string.new_conversation)
+                    view.findViewById<EditText>(R.id.task_input)?.setHint(R.string.continue_conversation_hint)
+                    view.findViewById<MaterialButton>(R.id.btn_start)?.setText(R.string.send_message)
                 }
             }
             val inputVis = inputArea?.visibility
@@ -700,14 +529,6 @@ class FloatingWindowService :
     /**
      * Creates and shows the floating window.
      */
-    private fun createAndShowWindow() {
-        Logger.d(TAG, "Creating and showing floating window")
-        createWindowView()
-        addWindowInternal()
-        // Note: updateStatus is now handled in createWindowView() based on current TaskExecutionManager state
-        Logger.d(TAG, "Floating window created and shown")
-    }
-
     /**
      * Creates the window view without showing it.
      */
@@ -730,15 +551,13 @@ class FloatingWindowService :
         setupButtons()
         setupTaskInput()
 
-        // Initialize UI with current state from TaskExecutionManager instead of assuming IDLE
-        // This fixes the bug where IDLE would overwrite the correct RUNNING status
-        // when the floating window is created after a task has already started
+        // Render the latest read-only projection when this platform view is recreated.
         val currentState = TaskExecutionManager.taskState.value
-        currentStatus = currentState.status
         updateUIForStatus(currentState.status)
         updateStatusIndicator(currentState.status)
+        updateUIFromTaskState(currentState)
+        renderInteraction(TaskExecutionManager.pendingInteraction.value)
         if (currentState.stepNumber > 0) {
-            currentStepNumber = currentState.stepNumber
             floatingView?.findViewById<TextView>(R.id.tv_step_counter)?.text =
                 getString(R.string.step_counter_format, currentState.stepNumber)
         }
@@ -839,9 +658,9 @@ class FloatingWindowService :
     private fun setupRecyclerView() {
         val recyclerView = floatingView?.findViewById<RecyclerView>(R.id.steps_recycler_view)
         recyclerView?.let { rv ->
-            rv.layoutManager = LinearLayoutManager(this)
-            stepsAdapter = StepsAdapter(stepsList)
-            rv.adapter = stepsAdapter
+            rv.layoutManager = LinearLayoutManager(this).apply { stackFromEnd = true }
+            rv.adapter = chatAdapter
+            chatAdapter.submitMessages(TaskExecutionManager.messages.value)
         }
     }
 
@@ -892,6 +711,14 @@ class FloatingWindowService :
             false // Don't consume the event, let it propagate for normal EditText behavior
         }
 
+        taskInput?.doAfterTextChanged { text ->
+            if (text?.isNotBlank() == true) TaskExecutionManager.pauseForDraft()
+            else TaskExecutionManager.onEditorBlur(false)
+        }
+        taskInput?.setOnFocusChangeListener { _, hasFocus ->
+            if (!hasFocus) TaskExecutionManager.onEditorBlur(taskInput.text?.isNotBlank() == true)
+        }
+
         // Template selection button
         selectTemplateBtn?.setOnClickListener {
             showTemplateSelectionPopup(it, taskInput)
@@ -900,6 +727,10 @@ class FloatingWindowService :
         startBtn?.setOnClickListener {
             val task = taskInput?.text?.toString()?.trim() ?: ""
             if (task.isNotBlank()) {
+                if (TaskExecutionManager.isTaskRunning()) {
+                    if (TaskExecutionManager.sendMessage(task)) taskInput?.text?.clear()
+                    return@setOnClickListener
+                }
                 // Check if we can start a task and get specific reason if not
                 val blockReason = TaskExecutionManager.getStartTaskBlockReason()
                 if (blockReason != TaskExecutionManager.StartTaskBlockReason.NONE) {
@@ -926,13 +757,10 @@ class FloatingWindowService :
                     return@setOnClickListener
                 }
 
-                // Clear focus and hide keyboard
-                clearInputFocus()
-
-                Logger.d(TAG, "Starting task via TaskExecutionManager: $task")
-                // Start task through TaskExecutionManager
-                // UI updates will happen automatically through state observation
-                TaskExecutionManager.startTask(task)
+                if (TaskExecutionManager.sendMessage(task)) {
+                    taskInput?.text?.clear()
+                    clearInputFocus()
+                }
             }
         }
     }
@@ -1089,13 +917,18 @@ class FloatingWindowService :
         }
 
         floatingView?.findViewById<ImageButton>(R.id.btn_close)?.setOnClickListener {
-            // Stop service and close window
-            stopSelf()
+            // Closing is explicit: do not resurrect the service on the next app background event.
+            if (TaskExecutionManager.isTaskRunning()) TaskExecutionManager.cancelTask()
+            FloatingWindowStateManager.close(this)
         }
 
         floatingView?.findViewById<MaterialButton>(R.id.btn_stop)?.setOnClickListener {
             Logger.d(TAG, "Stop button clicked")
             TaskExecutionManager.cancelTask()
+        }
+
+        floatingView?.findViewById<MaterialButton>(R.id.btn_finish_wait)?.setOnClickListener {
+            TaskExecutionManager.finishWaiting()
         }
 
         floatingView?.findViewById<MaterialButton>(R.id.btn_pause)?.setOnClickListener {
@@ -1112,7 +945,7 @@ class FloatingWindowService :
             Logger.d(TAG, "New task button clicked")
             // Reset TaskExecutionManager and local UI state
             TaskExecutionManager.resetTask()
-            reset()
+            floatingView?.findViewById<EditText>(R.id.task_input)?.text?.clear()
         }
     }
 
@@ -1120,6 +953,11 @@ class FloatingWindowService :
      * Toggles the minimized state of the floating window.
      */
     private fun toggleMinimize() {
+        FloatingWindowStateManager.setMinimized(!FloatingWindowStateManager.snapshot.value.minimized)
+    }
+
+    internal fun applyMinimizedPresentation(minimized: Boolean) {
+        if (floatingView == null) return
         val inputArea = floatingView?.findViewById<LinearLayout>(R.id.input_area)
         val recyclerView = floatingView?.findViewById<RecyclerView>(R.id.steps_recycler_view)
         val resultView = floatingView?.findViewById<TextView>(R.id.tv_result)
@@ -1129,14 +967,19 @@ class FloatingWindowService :
         val newTaskBtn = floatingView?.findViewById<MaterialButton>(R.id.btn_new_task)
         val minimizeBtn = floatingView?.findViewById<ImageButton>(R.id.btn_minimize)
         val container = floatingView?.findViewById<View>(R.id.floating_window_container)
+        val tokenUsage = floatingView?.findViewById<View>(R.id.token_usage)
+        val interaction = floatingView?.findViewById<View>(R.id.interaction_panel)
+        val finishWait = floatingView?.findViewById<View>(R.id.btn_finish_wait)
+        val previousWidth = layoutParams?.width
+        val previousHeight = layoutParams?.height
 
-        isMinimized = !isMinimized
+        tokenUsage?.visibility = if (minimized) View.GONE else View.VISIBLE
 
         val displayMetrics = resources.displayMetrics
         val screenWidth = displayMetrics.widthPixels
         val screenHeight = displayMetrics.heightPixels
 
-        if (isMinimized) {
+        if (minimized) {
             // Hide all content except header
             inputArea?.visibility = View.GONE
             recyclerView?.visibility = View.GONE
@@ -1145,6 +988,8 @@ class FloatingWindowService :
             pauseBtn?.visibility = View.GONE
             resumeBtn?.visibility = View.GONE
             newTaskBtn?.visibility = View.GONE
+            interaction?.visibility = View.GONE
+            finishWait?.visibility = View.GONE
             // Change icon to + (expand)
             minimizeBtn?.setImageResource(R.drawable.ic_plus)
 
@@ -1155,7 +1000,10 @@ class FloatingWindowService :
             layoutParams?.height = headerHeight
         } else {
             // Restore based on current status
-            updateUIForStatus(currentStatus)
+            updateUIForStatus(TaskExecutionManager.taskState.value.status)
+            val pending = TaskExecutionManager.pendingInteraction.value
+            interaction?.visibility = if (pending == null) View.GONE else View.VISIBLE
+            finishWait?.visibility = if (TaskExecutionManager.activeWait.value == null) View.GONE else View.VISIBLE
             if (resultView?.text?.isNotEmpty() == true) {
                 resultView.visibility = View.VISIBLE
             }
@@ -1167,7 +1015,7 @@ class FloatingWindowService :
             layoutParams?.height = (screenHeight * HEIGHT_PERCENT).toInt()
         }
 
-        if (isAttached.get()) {
+        if (isAttached.get() && (previousWidth != layoutParams?.width || previousHeight != layoutParams?.height)) {
             try {
                 windowManager?.updateViewLayout(floatingView, layoutParams)
             } catch (e: Exception) {
@@ -1176,61 +1024,4 @@ class FloatingWindowService :
         }
     }
 
-    // ==================== Steps Adapter ====================
-
-    /**
-     * RecyclerView adapter for displaying steps in the waterfall view.
-     *
-     * @property steps The list of steps to display
-     *
-     */
-    private inner class StepsAdapter(private val steps: List<FloatingStep>) :
-        RecyclerView.Adapter<StepsAdapter.ViewHolder>() {
-        /**
-         * ViewHolder for step items.
-         */
-        inner class ViewHolder(itemView: View) : RecyclerView.ViewHolder(itemView) {
-            val stepNumber: TextView = itemView.findViewById(R.id.step_number)
-            val thinkingText: TextView = itemView.findViewById(R.id.thinking_text)
-            val actionText: TextView = itemView.findViewById(R.id.action_text)
-        }
-
-        override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): ViewHolder {
-            val view =
-                LayoutInflater
-                    .from(parent.context)
-                    .inflate(R.layout.item_floating_step, parent, false)
-            return ViewHolder(view)
-        }
-
-        override fun onBindViewHolder(holder: ViewHolder, position: Int) {
-            val step = steps[position]
-            holder.stepNumber.text = step.stepNumber.toString()
-
-            // Check if both thinking and action are empty (loading state)
-            val isLoading = step.thinking.isBlank() && step.action.isBlank()
-
-            if (isLoading) {
-                // Show "thinking..." placeholder
-                holder.thinkingText.visibility = View.VISIBLE
-                holder.thinkingText.text = getString(R.string.floating_thinking)
-            } else if (step.thinking.isBlank()) {
-                holder.thinkingText.visibility = View.GONE
-            } else {
-                holder.thinkingText.visibility = View.VISIBLE
-                holder.thinkingText.text = step.thinking
-            }
-
-            // Hide action area (including dot separator) if action is empty
-            val actionContainer = holder.actionText.parent as? View
-            if (step.action.isBlank()) {
-                actionContainer?.visibility = View.GONE
-            } else {
-                actionContainer?.visibility = View.VISIBLE
-                holder.actionText.text = step.action
-            }
-        }
-
-        override fun getItemCount(): Int = steps.size
-    }
 }

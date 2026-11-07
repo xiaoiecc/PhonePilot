@@ -1,0 +1,21 @@
+PhonePilot is a derivative of AutoGLM-For-Android by Luokavin.
+Direct upstream: https://github.com/Luokavin/AutoGLM-For-Android
+Upstream base commit: a32425edbff18ac26d98a6a3784fc80def6cee4e
+Original copyright: Copyright (c) 2025 Luokavin
+The original MIT license and copyright notice are preserved in LICENSE.
+PhonePilot modifications are distributed under the same MIT license.
+
+The upstream Android project is based on zai-org/Open-AutoGLM:
+https://github.com/zai-org/Open-AutoGLM
+
+The optional packaged proxy executable is Mihomo v1.19.33 by MetaCubeX,
+licensed separately under GPL-3.0. It runs as a separate process and is
+not relicensed by this project's MIT license.
+Exact upstream source: https://github.com/MetaCubeX/mihomo/tree/v1.19.33
+Source archive: https://github.com/MetaCubeX/mihomo/archive/refs/tags/v1.19.33.tar.gz
+Binary provenance and checksums: scripts/fetch-mihomo.ps1
+Full license: app/src/main/assets/licenses/mihomo-GPL-3.0.txt
+Runtime attribution: app/src/main/assets/licenses/NOTICE.txt
+
+Other dependencies remain subject to their respective licenses.
+PhonePilot is not an official OpenAI, Tencent/QQ, or upstream project product.

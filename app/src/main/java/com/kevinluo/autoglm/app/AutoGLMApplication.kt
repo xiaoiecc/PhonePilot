@@ -4,6 +4,7 @@ import android.app.Activity
 import android.app.Application
 import android.os.Bundle
 import com.kevinluo.autoglm.config.SystemPrompts
+import com.kevinluo.autoglm.ShizukuConnectionManager
 import com.kevinluo.autoglm.settings.SettingsManager
 import com.kevinluo.autoglm.task.TaskExecutionManager
 import com.kevinluo.autoglm.ui.FloatingWindowStateManager
@@ -37,7 +38,7 @@ class AutoGLMApplication : Application() {
         LogFileManager.init(this)
 
         // Import dev profiles if available (debug builds only)
-        importDevProfilesIfNeeded()
+        // Credentials are configured on-device, never imported from APK assets.
 
         // Load custom system prompts if set
         loadCustomSystemPrompts()
@@ -47,6 +48,7 @@ class AutoGLMApplication : Application() {
 
         // Initialize TaskExecutionManager (after ComponentManager is available)
         TaskExecutionManager.initialize(this)
+        ShizukuConnectionManager.initialize(this)
 
         registerActivityLifecycleCallbacks(
             object : ActivityLifecycleCallbacks {

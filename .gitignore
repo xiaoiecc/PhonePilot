@@ -42,7 +42,6 @@ Thumbs.db
 .kiro/
 .agent/
 .shared/
-.github/
 
 # External projects
 Open-AutoGLM/
@@ -63,3 +62,16 @@ autoglm_logs_*/
 
 # Dev profiles config
 dev_profiles.json
+/work/
+*.dpapi
+/app/src/main/jniLibs/**/libmihomo.so
+
+# Local diagnostics and private device verification artifacts
+hs_err_pid*.log
+replay_pid*.log
+/docs/*-20261107.md
+/docs/superpowers/
+
+# Legacy upstream galleries are retained locally, not presented as PhonePilot screenshots
+/screenshots/*
+!/screenshots/logo.svg

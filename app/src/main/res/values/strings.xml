@@ -50,7 +50,16 @@
     <string name="task_section_label">任务输入</string>
     <string name="task_input_hint">描述你想要执行的任务...</string>
     <string name="start_task">启动</string>
+    <string name="continue_conversation">继续会话</string>
+    <string name="continue_conversation_hint">在此基础上继续...</string>
+    <string name="new_conversation">新会话</string>
+    <string name="reply_hint">输入回复...</string>
+    <string name="send_reply">发送回复</string>
+    <string name="send_message">发送</string>
+    <string name="running_message_hint">补充说明，将在安全点生效...</string>
+    <string name="agent_waiting_notification">PhoneAgent 正在等待你的回复</string>
     <string name="cancel_task">停止</string>
+    <string name="finish_waiting">结束等待</string>
     
     <!-- Task Status -->
     <string name="task_status_label">状态</string>
@@ -89,14 +98,14 @@
     <!-- Settings Activity -->
     <string name="settings_title">设置</string>
     <string name="settings_model_section">模型配置</string>
-    <string name="settings_model_description">配置 API 连接参数</string>
+    <string name="settings_model_description">OpenAI 官方 · Sol / Terra · 可调整思考档位</string>
     <string name="settings_agent_section">执行配置</string>
     <string name="settings_agent_description">配置任务执行参数</string>
     <string name="settings_base_url">API 地址</string>
     <string name="settings_model_name">模型名称</string>
     <string name="settings_api_key">API 密钥</string>
     <string name="settings_max_steps">最大步数</string>
-    <string name="settings_max_steps_hint">设置为 0 则无最大步数限制</string>
+    <string name="settings_max_steps_hint">每个任务 1–200 步，达到上限后停止</string>
     <string name="settings_screenshot_delay">截图延时（秒）</string>
     <string name="settings_screenshot_delay_hint">执行操作后等待页面加载的时间</string>
     <string name="settings_language">语言</string>
@@ -108,7 +117,7 @@
     <string name="settings_reset_done">已重置</string>
     <string name="settings_validation_error_url">请输入有效的 URL</string>
     <string name="settings_validation_error_model">请输入模型名称</string>
-    <string name="settings_validation_error_steps">步数不能为负数</string>
+    <string name="settings_validation_error_steps">请输入 1–200 之间的步数</string>
     <string name="settings_validation_error_delay">延时不能为负数</string>
     <string name="settings_saved_profiles">已保存的配置</string>
     <string name="settings_save_profile">保存配置</string>
@@ -169,6 +178,7 @@
     <string name="dialog_confirm_message">确定要执行此操作吗？</string>
     <string name="dialog_confirm">确认</string>
     <string name="dialog_cancel">取消</string>
+    <string name="takeover_completed">我已完成</string>
     <string name="dialog_choose_option">选择选项</string>
     <string name="dialog_select_option">请选择以下选项之一</string>
     <string name="cancel">取消</string>

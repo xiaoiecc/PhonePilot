@@ -7,13 +7,15 @@ plugins {
 android {
     namespace = "com.kevinluo.autoglm"
     compileSdk = 35
+    buildToolsVersion = "36.0.0"
 
     defaultConfig {
         applicationId = "com.kevinluo.autoglm"
         minSdk = 24
         targetSdk = 34
-        versionCode = 6
-        versionName = "0.0.6"
+        versionCode = 102
+        versionName = "1.0.2"
+        ndk { abiFilters += "arm64-v8a" }
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -33,7 +35,7 @@ android {
     buildTypes {
         debug {
             // 不再使用 applicationIdSuffix，与发行版使用相同包名
-            resValue("string", "app_name", "AutoGLM Dev")
+            resValue("string", "app_name", "PhonePilot")
         }
         release {
             isMinifyEnabled = false
@@ -53,6 +55,7 @@ android {
         buildConfig = true
         aidl = true
     }
+    packaging { jniLibs { useLegacyPackaging = true; keepDebugSymbols += "**/libmihomo.so" } }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_11
         targetCompatibility = JavaVersion.VERSION_11
@@ -80,31 +83,11 @@ android.applicationVariants.all {
         output.outputFileName = "AutoGLM-${variant.versionName}-${variant.buildType.name}.apk"
     }
 
-    if (variant.buildType.name == "debug") {
-        val copyDevProfiles =
-            tasks.register("copyDevProfiles${variant.name.replaceFirstChar { it.uppercase() }}") {
-                val devProfilesFile = rootProject.file("dev_profiles.json")
-                // Use debug-specific assets directory to avoid polluting release builds
-                val assetsDir = file("src/debug/assets")
-
-                doLast {
-                    if (devProfilesFile.exists()) {
-                        assetsDir.mkdirs()
-                        devProfilesFile.copyTo(File(assetsDir, "dev_profiles.json"), overwrite = true)
-                        println("Copied dev_profiles.json to debug assets")
-                    } else {
-                        println("dev_profiles.json not found, skipping")
-                    }
-                }
-            }
-
-        tasks.named("merge${variant.name.replaceFirstChar { it.uppercase() }}Assets") {
-            dependsOn(copyDevProfiles)
-        }
-    }
 }
 
 dependencies {
+    implementation(project(":automation-core"))
+    implementation("org.yaml:snakeyaml:2.4")
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.appcompat)
     implementation(libs.material)
@@ -155,6 +138,8 @@ dependencies {
 
     // Testing
     testImplementation(libs.junit)
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:${libs.versions.coroutines.get()}")
+    testImplementation("org.junit.jupiter:junit-jupiter:5.13.4")
     testImplementation(libs.kotest.runner.junit5)
     testImplementation(libs.kotest.property)
     testImplementation(libs.kotest.assertions.core)

@@ -1,14 +1,18 @@
 package com.kevinluo.autoglm
 
 import com.kevinluo.autoglm.util.Logger
-import java.io.BufferedReader
-import java.io.InputStreamReader
+import com.kevinluo.autoglm.util.BoundedProcessRunner
+import android.os.Build
+import com.kevinluo.autoglm.device.CommandResultParcel
 
 /**
  * User service for executing shell commands with elevated privileges.
  * This service runs in a separate process with Shizuku permissions.
  */
 class UserService : IUserService.Stub() {
+    private val commandRunner = BoundedProcessRunner(forceDestroy = { process ->
+        if (Build.VERSION.SDK_INT >= 26) process.destroyForcibly() else process.destroy()
+    })
     /**
      * Destroys the service and exits the process.
      */
@@ -23,35 +27,15 @@ class UserService : IUserService.Stub() {
      * @param command The shell command to execute
      * @return The command output including stdout, stderr, and exit code
      */
-    override fun executeCommand(command: String): String = try {
-        val process = Runtime.getRuntime().exec(arrayOf("sh", "-c", command))
-        val reader = BufferedReader(InputStreamReader(process.inputStream))
-        val errorReader = BufferedReader(InputStreamReader(process.errorStream))
-
-        val output = StringBuilder()
-        var line: String?
-
-        while (reader.readLine().also { line = it } != null) {
-            output.append(line).append("\n")
-        }
-
-        val errorOutput = StringBuilder()
-        while (errorReader.readLine().also { line = it } != null) {
-            errorOutput.append(line).append("\n")
-        }
-
-        val exitCode = process.waitFor()
-        reader.close()
-        errorReader.close()
-
-        if (errorOutput.isNotEmpty()) {
-            output.append("\n[stderr]\n").append(errorOutput)
-        }
-        output.append("\n[exit code: $exitCode]")
-
-        output.toString()
-    } catch (e: Exception) {
-        "Error: ${e.message}\n${e.stackTraceToString()}"
+    override fun executeArgs(argv: Array<out String>, timeoutMs: Long, maxOutputBytes: Int): CommandResultParcel = try {
+        require(argv.isNotEmpty() && argv.size <= 4096 && argv.none { '\u0000' in it })
+        require(argv.sumOf { it.length.toLong() } <= 200000)
+        require(maxOutputBytes in 1..480000)
+        val result = commandRunner.execute(argv.toList(), timeoutMs, maxOutputBytes)
+        CommandResultParcel(result.exitCode, result.stdout, result.stderr, result.timedOut, result.outputTruncated)
+    } catch (_: Exception) {
+        // Command text, shell output and stack traces can contain user input or credentials.
+        CommandResultParcel(null, "", "Command execution failed", false, false)
     }
 
     companion object {

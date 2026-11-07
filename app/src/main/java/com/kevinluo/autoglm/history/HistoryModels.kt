@@ -32,6 +32,34 @@ data class HistoryStep(
     val message: String? = null,
 )
 
+data class HistoryMessage(
+    val role: HistoryMessageRole,
+    val text: String,
+    val timestamp: Long = System.currentTimeMillis(),
+)
+
+enum class HistoryMessageRole { USER, AGENT }
+
+enum class HistoryToolStatus { SUCCEEDED, FAILED, CANCELLED, SKIPPED }
+
+/** A single tool invocation, distinct from a model turn and never an executable command. */
+data class HistoryToolCall(
+    val callId: String,
+    val runId: String,
+    val stepNumber: Int,
+    val name: String,
+    val arguments: String,
+    val startedAt: Long,
+    val finishedAt: Long,
+    val status: HistoryToolStatus,
+    val result: String,
+    val actions: List<AgentAction> = emptyList(),
+    val beforeScreenshotPath: String? = null,
+    val afterScreenshotPath: String? = null,
+    val annotatedScreenshotPath: String? = null,
+    val detailsTruncated: Boolean = false,
+)
+
 /**
  * Represents a complete task execution history.
  *
@@ -51,10 +79,19 @@ data class TaskHistory(
     val id: String = UUID.randomUUID().toString(),
     val taskDescription: String,
     val startTime: Long = System.currentTimeMillis(),
+    val conversationId: String = id,
     var endTime: Long? = null,
     var success: Boolean = false,
     var completionMessage: String? = null,
     val steps: MutableList<HistoryStep> = mutableListOf(),
+    val messages: MutableList<HistoryMessage> = mutableListOf(),
+    var previousResponseId: String? = null,
+    var totalInputTokens: Long = 0,
+    var totalOutputTokens: Long = 0,
+    var totalCachedTokens: Long = 0,
+    var hasInputUsage: Boolean = false,
+    var hasOutputUsage: Boolean = false,
+    val toolCalls: MutableList<HistoryToolCall> = mutableListOf(),
 ) {
     /** Duration of the task in milliseconds. */
     val duration: Long

@@ -17,15 +17,32 @@ object KeyboardHelper {
     private const val TAG = "KeyboardHelper"
 
     /** AutoGLM package name. */
-    private const val PACKAGE_NAME = "com.kevinluo.autoglm"
+    private const val PACKAGE_NAME = com.kevinluo.autoglm.BuildConfig.APPLICATION_ID
 
     /** AutoGLM Keyboard IME ID (Android system format). */
-    const val IME_ID = "$PACKAGE_NAME/.input.AutoGLMKeyboardService"
+    const val IME_ID = "$PACKAGE_NAME/com.kevinluo.autoglm.input.AutoGLMKeyboardService"
 
     /**
      * Checks if the given IME ID belongs to AutoGLM Keyboard.
      */
-    fun isAutoGLMKeyboard(imeId: String): Boolean = imeId.startsWith("$PACKAGE_NAME/")
+    fun isAutoGLMKeyboard(imeId: String): Boolean {
+        if (!isValidImeId(imeId)) return false
+        val (packageName, serviceName) = imeId.split('/', limit = 2)
+        val canonical = if (serviceName.startsWith('.')) packageName + serviceName else serviceName
+        return packageName == PACKAGE_NAME && canonical == "com.kevinluo.autoglm.input.AutoGLMKeyboardService"
+    }
+
+    internal fun isValidImeId(imeId: String): Boolean = imeId.length in 3..512 &&
+        imeId.matches(Regex("[A-Za-z_][A-Za-z0-9_.]*/[A-Za-z_.$][A-Za-z0-9_.$]*"))
+
+    internal fun sameIme(first: String, second: String): Boolean {
+        if (!isValidImeId(first) || !isValidImeId(second)) return false
+        fun canonical(value: String): String {
+            val (packageName, serviceName) = value.split('/', limit = 2)
+            return packageName + "/" + if (serviceName.startsWith('.')) packageName + serviceName else serviceName
+        }
+        return canonical(first) == canonical(second)
+    }
 
     /**
      * Keyboard status enumeration.

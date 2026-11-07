@@ -21,6 +21,13 @@ import android.widget.RadioButton
 import android.widget.RadioGroup
 import android.widget.TextView
 import android.widget.Toast
+import android.widget.LinearLayout
+import com.kevinluo.autoglm.ComponentManager
+import com.kevinluo.autoglm.proxy.ProxySettingsActivity
+import kotlinx.coroutines.CancellationException
+import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.Fragment
@@ -92,6 +99,9 @@ class SettingsFragment : Fragment() {
     private lateinit var modelNameInput: TextInputEditText
     private lateinit var apiKeyLayout: TextInputLayout
     private lateinit var apiKeyInput: TextInputEditText
+    private var reasoningEffort = "medium"
+    private var reasoningButton: Button? = null
+    private var connectionStatus: TextView? = null
 
     // Agent settings views
     private lateinit var maxStepsLayout: TextInputLayout
@@ -186,6 +196,7 @@ class SettingsFragment : Fragment() {
         initViews(view)
         loadCurrentSettings()
         setupListeners()
+        setupComputerSettings()
         observePermissionStates()
     }
 
@@ -308,6 +319,8 @@ class SettingsFragment : Fragment() {
     private fun loadCurrentSettings() {
         Logger.d(TAG, "Loading current settings")
         val modelConfig = settingsManager.getModelConfig()
+        reasoningEffort = modelConfig.reasoningEffort
+        reasoningButton?.text = "思考档位：$reasoningEffort"
         val agentConfig = settingsManager.getAgentConfig()
 
         loadSavedProfiles()
@@ -789,14 +802,14 @@ class SettingsFragment : Fragment() {
         }
 
         val modelName = modelNameInput.text?.toString()?.trim() ?: ""
-        if (modelName.isEmpty()) {
+        if (modelName !in listOf("gpt-6.1-sol", "gpt-6.1-terra")) {
             modelNameLayout.error = getString(R.string.settings_validation_error_model)
             isValid = false
         }
 
         val maxStepsStr = maxStepsInput.text?.toString()?.trim() ?: ""
         val maxSteps = maxStepsStr.toIntOrNull()
-        if (maxSteps == null || maxSteps < 0) {
+        if (maxSteps == null || maxSteps !in 1..200) {
             maxStepsLayout.error = getString(R.string.settings_validation_error_steps)
             isValid = false
         }
@@ -839,7 +852,7 @@ class SettingsFragment : Fragment() {
         val screenshotDelayMs = (screenshotDelaySeconds * 1000).toLong()
         val language = if (languageEnglish.isChecked) "en" else "cn"
 
-        val modelConfig = ModelConfig(baseUrl = baseUrl, apiKey = apiKey, modelName = modelName)
+        val modelConfig = ModelConfig(baseUrl = baseUrl, apiKey = apiKey, modelName = modelName, reasoningEffort = reasoningEffort)
         settingsManager.saveModelConfig(modelConfig)
 
         val agentConfig =
@@ -849,6 +862,7 @@ class SettingsFragment : Fragment() {
                 screenshotDelayMs = screenshotDelayMs,
             )
         settingsManager.saveAgentConfig(agentConfig)
+        ComponentManager.getInstance(requireContext()).reinitializeAgent()
 
         saveWakeWords()
 
@@ -892,47 +906,81 @@ class SettingsFragment : Fragment() {
                 timeoutSeconds = 30,
             )
 
-        val client = ModelClient(testConfig)
-
         testConnectionButton.isEnabled = false
         testConnectionButton.text = getString(R.string.settings_testing)
+        connectionStatus?.text = "正在验证 $modelName / $reasoningEffort…"
 
         viewLifecycleOwner.lifecycleScope.launch {
-            val result = client.testConnection()
-            Logger.d(TAG, "Connection test result: $result")
-
-            testConnectionButton.isEnabled = true
-            testConnectionButton.text = getString(R.string.settings_test_connection)
-
-            val message =
-                when (result) {
-                    is ModelClient.TestResult.Success -> {
-                        getString(R.string.settings_test_success, result.latencyMs)
-                    }
-
-                    is ModelClient.TestResult.AuthError -> {
-                        getString(R.string.settings_test_auth_error, result.message)
-                    }
-
-                    is ModelClient.TestResult.ModelNotFound -> {
-                        getString(R.string.settings_test_model_not_found, result.message)
-                    }
-
-                    is ModelClient.TestResult.ServerError -> {
-                        getString(R.string.settings_test_server_error, result.code, result.message)
-                    }
-
-                    is ModelClient.TestResult.ConnectionError -> {
-                        getString(R.string.settings_test_connection_error, result.message)
-                    }
-
-                    is ModelClient.TestResult.Timeout -> {
-                        getString(R.string.settings_test_timeout, result.message)
-                    }
-                }
-
-            Toast.makeText(requireContext(), message, Toast.LENGTH_LONG).show()
+            try {
+                val client = ComponentManager.getInstance(requireContext())
+                    .createComputerClient(testConfig.copy(reasoningEffort = reasoningEffort))
+                val response = client.request(buildJsonArray {
+                    add(buildJsonObject { put("role", "user"); put("content", "Connectivity test only. Reply OK. Do not call any tools.") })
+                })
+                check(response.calls.isEmpty() && response.functionCalls.isEmpty()) { "连接测试返回了意外工具调用" }
+                connectionStatus?.text = "OpenAI 连接成功：$modelName / $reasoningEffort"
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                connectionStatus?.text = e.message ?: "连接失败"
+            } finally {
+                testConnectionButton.isEnabled = true
+                testConnectionButton.text = getString(R.string.settings_test_connection)
+            }
         }
+    }
+
+    private fun setupComputerSettings() {
+        (profileSelectorLayout.parent as? View)?.visibility = View.GONE
+        baseUrlInput.setText("https://api.openai.com/v1")
+        baseUrlInput.isEnabled = false
+        modelNameInput.keyListener = null
+        modelNameInput.isFocusable = false
+        modelNameInput.setOnClickListener {
+            val models = arrayOf("gpt-6.1-terra", "gpt-6.1-sol")
+            MaterialAlertDialogBuilder(requireContext()).setTitle("选择模型")
+                .setSingleChoiceItems(models, models.indexOf(modelNameInput.text.toString())) { dialog, index ->
+                    modelNameInput.setText(models[index])
+                    if (reasoningEffort !in settingsManager.reasoningLevels(models[index])) reasoningEffort = "medium"
+                    reasoningButton?.text = "思考档位：$reasoningEffort"
+                    dialog.dismiss()
+                }.show()
+        }
+        val column = baseUrlLayout.parent as LinearLayout
+        connectionStatus = TextView(requireContext()).apply {
+            textSize = 14f
+            setPadding(0, 8, 0, 8)
+        }
+        column.addView(connectionStatus, column.indexOfChild(testConnectionButton) + 1)
+        reasoningButton = com.google.android.material.button.MaterialButton(requireContext()).apply {
+            text = "思考档位：$reasoningEffort"
+            setOnClickListener {
+                val levels = settingsManager.reasoningLevels(modelNameInput.text.toString()).toTypedArray()
+                MaterialAlertDialogBuilder(requireContext()).setTitle("思考档位（越高通常越慢、费用越高）")
+                    .setSingleChoiceItems(levels, levels.indexOf(reasoningEffort)) { dialog, index ->
+                        reasoningEffort = levels[index]
+                        text = "思考档位：$reasoningEffort"
+                        dialog.dismiss()
+                    }.show()
+            }
+        }
+        column.addView(reasoningButton)
+        column.addView(com.google.android.material.button.MaterialButton(requireContext()).apply {
+            text = "内置代理 · 订阅与节点"
+            setOnClickListener { startActivity(Intent(requireContext(), ProxySettingsActivity::class.java)) }
+        })
+        column.addView(com.google.android.material.button.MaterialButton(requireContext()).apply {
+            text = "启用无障碍 · 优先文字操作"
+            setOnClickListener { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
+        })
+        column.addView(TextView(requireContext()).apply {
+            text = "手机独立运行 · OpenAI Responses\n优先使用无障碍节点，必要时使用截图。密钥仅保存在本机加密设置中。选择模型与思考档位后点击顶部保存。"
+            setPadding(0, 12, 0, 12)
+        })
+        // Legacy AutoGLM text-command prompts are not used by the new tool runtime.
+        var ancestor = btnEditPromptCn.parent
+        while (ancestor is View && ancestor !is com.google.android.material.card.MaterialCardView) ancestor = ancestor.parent
+        (ancestor as? View)?.visibility = View.GONE
     }
 
     // endregion
