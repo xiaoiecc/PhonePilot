@@ -50,6 +50,11 @@ object TaskExecutionManager {
         coordinator.requestExecutionMode(it, mode)
     } ?: false
 
+    fun onScreenEvent(event: ScreenEvent): Boolean = coordinator.snapshot.value.runId?.let {
+        val mode = if (event == ScreenEvent.SCREEN_OFF) ExecutionMode.BACKGROUND else ExecutionMode.FOREGROUND
+        coordinator.requestExecutionMode(it, mode, event)
+    } ?: false
+
     fun sendAndResume(text: String): Boolean {
         val pending = pendingInteraction.value
         if (pending != null) return if (pending.kind == InteractionKind.TEXT) {
@@ -64,6 +69,17 @@ object TaskExecutionManager {
         FloatingWindowStateManager.initialize(context)
         scope.launch {
             coordinator.snapshot.collect { state ->
+                com.kevinluo.autoglm.util.DiagnosticLog.event("Run", "snapshot",
+                    "runId" to state.runId, "conversationId" to state.conversationId,
+                    "phase" to state.phase, "step" to state.stepNumber,
+                    "pauseReasons" to state.pauseReasons.map { it.name },
+                    "pendingId" to state.pendingInteraction?.id, "pendingKind" to state.pendingInteraction?.kind,
+                    "waitId" to state.activeWait?.id, "waitRequestedMs" to state.activeWait?.requestedMs,
+                    "stepsStored" to state.steps.size, "deviceToolsRequested" to state.deviceToolsRequested,
+                    "executionMode" to state.executionMode, "placementGeneration" to state.placementGeneration,
+                    "placementSwitching" to state.placementSwitching,
+                    "hasPlacementError" to (state.placementError != null),
+                    "inputTokens" to state.totalInputTokens, "outputTokens" to state.totalOutputTokens)
                 FloatingWindowStateManager.onRunChanged(state)
                 if (state.pendingInteraction?.kind == InteractionKind.TEXT) AgentNotificationHelper.showWaitingForUser(context)
                 else AgentNotificationHelper.cancel(context)

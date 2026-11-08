@@ -75,6 +75,13 @@ object Logger {
         }
     }
 
+    fun v(tag: String, message: String, throwable: Throwable) {
+        if (minLevel <= Level.VERBOSE) {
+            Log.v(formatTag(tag), formatMessage(message), throwable)
+            writeToFileIfEnabled("VERBOSE", tag, message, throwable)
+        }
+    }
+
     /**
      * Logs a debug message.
      *

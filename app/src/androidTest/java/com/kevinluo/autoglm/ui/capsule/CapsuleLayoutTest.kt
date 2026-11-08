@@ -10,6 +10,8 @@ import androidx.appcompat.widget.AppCompatImageButton
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.kevinluo.autoglm.R
+import com.kevinluo.autoglm.ui.FloatingWindowStateManager
+import com.kevinluo.autoglm.ui.FloatingWindowService
 import org.junit.Assert.*
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -69,6 +71,50 @@ class CapsuleLayoutTest {
                 assertTrue("header control height", control.measuredHeight >= (48 * density).toInt())
             }
             assertEquals(View.GONE, view.findViewById<View>(R.id.capsule_body).visibility)
+        }
+    }
+
+    @Test fun upperRightControlTogglesActualMinimizedState() {
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            val application = InstrumentationRegistry.getInstrumentation().targetContext
+            FloatingWindowStateManager.initialize(application)
+            FloatingWindowStateManager.reset()
+            assertFalse(FloatingWindowStateManager.snapshot.value.minimized)
+            val service = FloatingWindowService()
+            val view = LayoutInflater.from(application).inflate(R.layout.layout_floating_window, null)
+            FloatingWindowService::class.java.getDeclaredField("floatingView").apply {
+                isAccessible = true
+                set(service, view)
+            }
+            val params = android.view.WindowManager.LayoutParams()
+            FloatingWindowService::class.java.getDeclaredField("layoutParams").apply {
+                isAccessible = true
+                set(service, params)
+            }
+            FloatingWindowService::class.java.getDeclaredField("isAttached").apply {
+                isAccessible = true
+                set(service, java.util.concurrent.atomic.AtomicBoolean(true))
+            }
+            val method = FloatingWindowService::class.java.getDeclaredMethod("setupButtons", View::class.java)
+            method.isAccessible = true
+            method.invoke(service, view)
+            view.findViewById<View>(R.id.btn_progress_details).performClick()
+            assertTrue(FloatingWindowStateManager.snapshot.value.minimized)
+            assertEquals(View.VISIBLE, view.findViewById<View>(R.id.tv_status).visibility)
+            assertEquals(View.VISIBLE, view.findViewById<View>(R.id.btn_minimize).visibility)
+            assertEquals(View.VISIBLE, view.findViewById<View>(R.id.status_indicator).visibility)
+            assertEquals(View.VISIBLE, view.findViewById<View>(R.id.btn_progress_details).visibility)
+            FloatingWindowService::class.java.getDeclaredMethod("resizeToContent", View::class.java).apply {
+                isAccessible = true
+                invoke(service, view)
+            }
+            val expectedWidth = minOf(application.resources.displayMetrics.widthPixels -
+                (24 * application.resources.displayMetrics.density).toInt(),
+                (400 * application.resources.displayMetrics.density).toInt())
+            assertEquals(expectedWidth, params.width)
+            view.findViewById<View>(R.id.btn_progress_details).performClick()
+            assertFalse(FloatingWindowStateManager.snapshot.value.minimized)
+            FloatingWindowStateManager.reset()
         }
     }
 

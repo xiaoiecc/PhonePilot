@@ -14,6 +14,38 @@ import org.junit.jupiter.api.Test
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class PhoneAgentResponsesTest {
+    @Test fun `null commentary is rejected before any device action`() = runTest {
+        val service = mockk<PhoneAccessibilityService>(relaxed = true)
+        val h = RunnerHarness(this, service = service)
+        h.respond(ComputerResponse("r1", emptyList(), "", listOf(
+            ComputerFunctionCall("observe", "android_ui", obj("""{"operation":"observe","commentary":null}""")),
+        )), finalResponse())
+        assertFalse(h.run().success)
+        coVerify(exactly = 0) { service.execute(any(), any()) }
+    }
+
+    @Test fun `top level tool failure retains its complete stack`() = runTest {
+        val h = RunnerHarness(this)
+        h.respond(functionResponse("r1", function("observe", "android_ui",
+            """{"operation":"observe","snapshot_id":null,"node_id":null,"search_scroll":true}""")))
+        val outcome = h.run()
+        assertFalse(outcome.success)
+        assertTrue(outcome.message.contains("java.lang.IllegalArgumentException: Failed requirement."))
+        assertTrue(outcome.message.contains("ToolCommandDecoder.ui"), outcome.message)
+        assertTrue(outcome.message.contains("PhoneAgent.turn"), outcome.message)
+    }
+
+    @Test fun `observe works when placement refresh already uses the device gate`() = runTest {
+        val service = mockk<PhoneAccessibilityService>(relaxed = true)
+        coEvery { service.execute(any(), any()) } returns "snapshot"
+        val h = RunnerHarness(this, service = service, beforeDeviceTools = { control ->
+            control.deviceOperation { }
+        })
+        h.respond(functionResponse("r1", function("observe", "android_ui", """{"operation":"observe","snapshot_id":null,"node_id":null}""")), finalResponse())
+        assertTrue(h.run().success)
+        coVerify(exactly = 1) { service.execute(match { it is UiCommand.Observe }, any()) }
+    }
+
     @Test fun `dynamic semantic click uses the same dispatcher trace and text only tool response`() = runTest {
         val service = mockk<PhoneAccessibilityService>(relaxed = true)
         coEvery { service.observe() } returns UiSnapshot("s1", "list")
@@ -328,7 +360,7 @@ class PhoneAgentResponsesTest {
         coVerify(exactly = 1) { h.device.pressKey(4) }
     }
 
-    @Test fun `a missing explanation in a later call rejects the whole batch without side effects`() = runTest {
+    @Test fun `a missing explanation rejects the whole batch without side effects`() = runTest {
         val h = RunnerHarness(this)
         h.respond(functionResponse("r1",
             function("first", "android_system_key", """{"key":"HOME","commentary":"先回到桌面。"}"""),

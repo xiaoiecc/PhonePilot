@@ -229,9 +229,12 @@ class ComputerProtocolTest {
         assertEquals(setOf("click", "double_click", "drag", "move", "scroll", "keypress", "type", "wait", "screenshot"), actionTypes)
         val click = variants.single { it["properties"]!!.jsonObject["type"]!!.jsonObject["enum"]!!.jsonArray.single().jsonPrimitive.content == "click" }
         assertEquals("string", click["properties"]!!.jsonObject["button"]!!.jsonObject["type"]!!.jsonPrimitive.content)
-        assertEquals(setOf("left", "right", "wheel", "back", "forward"),
+        assertEquals(setOf("left", "wheel", "back", "forward"),
             click["properties"]!!.jsonObject["button"]!!.jsonObject["enum"]!!.jsonArray.map { it.jsonPrimitive.content }.toSet())
         assertTrue(click["required"]!!.jsonArray.contains(JsonPrimitive("button")))
+        assertFalse(click["properties"]!!.jsonObject.containsKey("keys"))
+        val keypress = variants.single { it["properties"]!!.jsonObject["type"]!!.jsonObject["enum"]!!.jsonArray.single().jsonPrimitive.content == "keypress" }
+        assertEquals(1, keypress["properties"]!!.jsonObject["keys"]!!.jsonObject["maxItems"]!!.jsonPrimitive.content.toInt())
 
         val gesture = functions.single { it["name"]!!.jsonPrimitive.content == "android_gesture" }
         val gestureProperties = gesture["parameters"]!!.jsonObject["properties"]!!.jsonObject
@@ -241,10 +244,10 @@ class ComputerProtocolTest {
 
         val valid = listOf(
             "android_computer" to objectOf("""{"actions":[{"type":"click","x":10,"y":20,"button":"left"}]}"""),
-            "android_computer" to objectOf("""{"actions":[{"type":"double_click","x":10,"y":20,"keys":null}]}"""),
-            "android_computer" to objectOf("""{"actions":[{"type":"drag","path":[{"x":10,"y":20},{"x":30,"y":40}],"keys":null}]}"""),
-            "android_computer" to objectOf("""{"actions":[{"type":"move","x":10,"y":20,"keys":null}]}"""),
-            "android_computer" to objectOf("""{"actions":[{"type":"scroll","x":10,"y":20,"scroll_x":0,"scroll_y":100,"keys":null}]}"""),
+            "android_computer" to objectOf("""{"actions":[{"type":"double_click","x":10,"y":20}]}"""),
+            "android_computer" to objectOf("""{"actions":[{"type":"drag","path":[{"x":10,"y":20},{"x":30,"y":40}]}]}"""),
+            "android_computer" to objectOf("""{"actions":[{"type":"move","x":10,"y":20}]}"""),
+            "android_computer" to objectOf("""{"actions":[{"type":"scroll","x":10,"y":20,"scroll_x":0,"scroll_y":100}]}"""),
             "android_computer" to objectOf("""{"actions":[{"type":"keypress","keys":["ENTER"]}]}"""),
             "android_computer" to objectOf("""{"actions":[{"type":"type","text":"hello"}]}"""),
             "android_computer" to objectOf("""{"actions":[{"type":"wait"}]}"""),
@@ -267,6 +270,7 @@ class ComputerProtocolTest {
     fun `new function tools reject malformed arguments before execution`() {
         val invalid = listOf(
             "android_computer" to objectOf("""{"actions":[{"type":"click","x":241,"y":196,"button":null}]}"""),
+            "android_computer" to objectOf("""{"actions":[{"type":"click","x":10,"y":20,"button":"left","keys":null}]}"""),
             "android_gesture" to objectOf("""{"operation":"swipe","x":10,"y":20,"end_x":null,"end_y":40,"duration_ms":400,"humanized":true,"confirmation_message":null}"""),
             "android_gesture" to objectOf("""{"operation":"swipe","x":10,"y":20,"end_x":30,"end_y":40,"duration_ms":0,"humanized":true,"confirmation_message":null}"""),
             "android_gesture" to objectOf("""{"operation":"long_press","x":10,"y":20,"end_x":null,"end_y":null,"duration_ms":5001,"humanized":false,"confirmation_message":null}"""),

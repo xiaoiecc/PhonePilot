@@ -8,7 +8,7 @@ import kotlin.math.roundToInt
 
 /** Validated, physical-pixel operations. Never pass these through the legacy 0..999 converter. */
 sealed interface PreparedAction {
-    data class Tap(val point: Point, val longPress: Boolean = false, val doubleTap: Boolean = false) : PreparedAction
+    data class Tap(val point: Point, val doubleTap: Boolean = false) : PreparedAction
     data class Swipe(val from: Point, val to: Point) : PreparedAction
     data class Scroll(val gestures: List<Swipe>) : PreparedAction
     data class Type(val text: String) : PreparedAction
@@ -45,13 +45,12 @@ object ComputerActionMapper {
         return when (actionType) {
             "click" -> {
                 val button = action.string("button")
-                require(button in setOf("left", "right", "wheel", "back", "forward")) { "Unsupported computer button" }
+                require(button in setOf("left", "wheel", "back", "forward")) { "Unsupported computer button" }
                 val target = at()
                 when (button) {
                     "back" -> PreparedAction.Key(4)
                     "forward" -> PreparedAction.Key(125) // KEYCODE_FORWARD; 6 is ENDCALL.
                     "wheel" -> error("Middle mouse clicks are unsupported on a touchscreen")
-                    "right" -> PreparedAction.Tap(target, longPress = true)
                     else -> PreparedAction.Tap(target)
                 }
             }

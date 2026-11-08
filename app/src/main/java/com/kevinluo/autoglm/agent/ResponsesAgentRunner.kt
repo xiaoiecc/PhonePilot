@@ -107,7 +107,7 @@ internal class PhoneAgent(
         } catch (_: CancellationException) {
             outcome = RunOutcome(false, cancellationMessage(), currentStepNumber)
         } catch (error: Exception) {
-            outcome = RunOutcome(false, error.message?.take(300) ?: "手机操作失败，任务已停止", currentStepNumber)
+            outcome = RunOutcome(false, error.stackTraceToString(), currentStepNumber)
         } finally {
             val accepted = synchronized(messageLock) {
                 pendingMessages?.toList().orEmpty().also { pendingMessages = null }

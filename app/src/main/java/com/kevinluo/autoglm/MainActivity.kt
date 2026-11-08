@@ -21,6 +21,7 @@ import androidx.navigation.ui.setupWithNavController
 import com.google.android.material.bottomnavigation.BottomNavigationView
 import com.kevinluo.autoglm.ui.MainUiEvent
 import com.kevinluo.autoglm.ui.MainViewModel
+import com.kevinluo.autoglm.ui.PermissionType
 import com.kevinluo.autoglm.ui.ShizukuStatus
 import com.kevinluo.autoglm.util.Logger
 import kotlinx.coroutines.launch
@@ -65,6 +66,7 @@ class MainActivity : BaseActivity() {
         setupShizuku()
         observeEvents()
         checkOverlayPermission()
+        checkAccessibilityPermission()
 
         // Handle incoming Intent for backward compatibility
         handleIntent(intent)
@@ -136,7 +138,9 @@ class MainActivity : BaseActivity() {
     override fun onResume() {
         super.onResume()
         checkOverlayPermission()
+        checkAccessibilityPermission()
         ShizukuConnectionManager.refresh()
+        com.kevinluo.autoglm.display.ScreenModeController.refresh(this)
     }
 
     override fun onDestroy() {
@@ -243,6 +247,13 @@ class MainActivity : BaseActivity() {
     private fun checkOverlayPermission() {
         val hasPermission = Settings.canDrawOverlays(this)
         viewModel.updateOverlayPermission(hasPermission)
+    }
+
+    private fun checkAccessibilityPermission() {
+        viewModel.updatePermissionState(
+            PermissionType.ACCESSIBILITY,
+            com.kevinluo.autoglm.accessibility.AccessibilityPermission.isServiceReady(this),
+        )
     }
 
     /**

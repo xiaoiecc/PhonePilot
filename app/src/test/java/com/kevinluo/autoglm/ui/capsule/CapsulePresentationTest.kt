@@ -79,12 +79,33 @@ class CapsulePresentationTest {
         assertTrue(project(run).waitVisible)
     }
 
-    @Test fun `completed and failed conversation retain send and explicit new conversation`() {
+    @Test fun `collapsed running capsule keeps its identity and task controls`() {
+        val collapsed = project(RunSnapshot(phase = RunPhase.RUNNING), minimized = true)
+        assertFalse(collapsed.bodyVisible)
+        assertTrue(collapsed.pauseVisible)
+        assertTrue(collapsed.stopVisible)
+        assertFalse(collapsed.inputVisible)
+    }
+
+    @Test fun `keep screen on is limited to active foreground execution`() {
+        val run = RunSnapshot(phase = RunPhase.RUNNING)
+        assertTrue(project(run).keepScreenOn)
+        assertFalse(CapsulePresentation.from(run, minimized = false, details = false, hasDraft = false, background = true).keepScreenOn)
+        assertFalse(project(run.copy(phase = RunPhase.COMPLETED)).keepScreenOn)
+    }
+
+    @Test fun `completed and failed stay expanded until minimized into a capsule`() {
         listOf(RunPhase.COMPLETED, RunPhase.FAILED).forEach { phase ->
-            val state = project(RunSnapshot(phase = phase))
-            assertTrue(state.inputVisible)
-            assertTrue(state.newConversationVisible)
-            assertFalse(state.stopVisible)
+            val run = RunSnapshot(phase = phase)
+            val expanded = project(run)
+            assertTrue(expanded.bodyVisible)
+            assertTrue(expanded.inputVisible)
+            assertTrue(expanded.newConversationVisible)
+            assertFalse(expanded.stopVisible)
+            val minimized = project(run, minimized = true)
+            assertFalse(minimized.bodyVisible)
+            assertFalse(minimized.inputVisible)
+            assertFalse(minimized.newConversationVisible)
         }
     }
 }

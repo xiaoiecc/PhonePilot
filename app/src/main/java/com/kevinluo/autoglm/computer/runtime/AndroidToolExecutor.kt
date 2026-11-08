@@ -15,6 +15,8 @@ import com.kevinluo.autoglm.input.InputResult
 import com.kevinluo.autoglm.input.TextEditRequest
 import com.kevinluo.autoglm.screenshot.Screenshot
 import com.kevinluo.autoglm.screenshot.ScreenshotService
+import com.kevinluo.autoglm.screenshot.FloatingWindowController
+import com.kevinluo.autoglm.screenshot.withOverlayHidden
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.serialization.json.*
@@ -38,6 +40,7 @@ internal class AndroidToolExecutor(
     private val textEditor: (suspend (TextEditRequest) -> InputResult)? = null,
     private val beforeDeviceTools: suspend (RunControl) -> Unit = { it.emit(com.kevinluo.autoglm.core.RunProgress.DeviceToolsRequested) },
     private val accessibility: () -> PhoneAccessibilityService? = { PhoneAccessibilityService.instance },
+    private val window: () -> FloatingWindowController? = { null },
 ) {
     private class MissingVisualObservation : IllegalStateException(
         "No current screenshot: this entire batch was not executed. Inspect a fresh observation and generate new actions; do not replay this batch."
@@ -137,6 +140,12 @@ internal class AndroidToolExecutor(
         requestGeneration: Long = control.placementGeneration): ToolBatchResult {
         val traces = ToolTraceBatch(response, control.runId, stepNumber)
         val batchGeneration = requestGeneration
+        com.kevinluo.autoglm.util.DiagnosticLog.event("Tools", "batch.started",
+            "runId" to control.runId, "step" to stepNumber, "calls" to response.outputOrder.size,
+            "callNames" to response.functionCalls.map { it.name }, "nativeCalls" to response.calls.size,
+            "hasInitialFrame" to (initialFrame != null), "frameWidth" to initialFrame?.width,
+            "frameHeight" to initialFrame?.height, "requestGeneration" to requestGeneration,
+            "currentGeneration" to control.placementGeneration)
         return try {
             if (requestGeneration != control.placementGeneration) {
                 val error = ExecutionTargetChangedException()
@@ -190,6 +199,16 @@ internal class AndroidToolExecutor(
             for (command in commands) {
                 if (hasPendingMessage()) break
                 val trace = traces.begin(command.id, frame)
+                com.kevinluo.autoglm.util.DiagnosticLog.event("Tools", "command.started",
+                    "runId" to control.runId, "callId" to command.id,
+                    "kind" to when (command) {
+                        is Command.Native -> "computer"
+                        is Command.Capture -> "screenshot"
+                        is Command.Ui -> "ui"
+                        is Command.Function -> "function"
+                    },
+                    "actionCount" to (command as? Command.Native)?.actions?.size,
+                    "functionType" to (command as? Command.Function)?.command?.javaClass?.simpleName)
                 try {
                     control.checkpoint()
                     val commentary = when (command) {
@@ -252,7 +271,12 @@ internal class AndroidToolExecutor(
                             val result = if (service == null) "ERROR: Accessibility service is unavailable. Enable it or use android_screenshot. No UI action was executed."
                                 else {
                                     if (!readOnly) { frame = null; changed = true }
-                                    control.deviceOperation(batchGeneration) { service.execute(command.command, textEditor) }
+                                    control.deviceOperation(batchGeneration) {
+                                        if (readOnly) service.execute(command.command, textEditor)
+                                        else withOverlayHidden(window(), checkpoint = control::checkpoint) {
+                                            service.execute(command.command, textEditor)
+                                        }
+                                    }
                                 }
                             if (!readOnly && !result.startsWith("ERROR:")) count++
                             trace.result = result
@@ -285,15 +309,26 @@ internal class AndroidToolExecutor(
                         }
                     }
                     trace.finished = System.currentTimeMillis()
+                    com.kevinluo.autoglm.util.DiagnosticLog.event("Tools", "command.completed",
+                        "runId" to control.runId, "callId" to command.id, "status" to trace.status,
+                        "actionCount" to trace.actions.size, "resultLength" to trace.result?.length,
+                        "hasAfterFrame" to (trace.after != null))
                 } catch (error: ExecutionTargetChangedException) {
                     trace.status = HistoryToolStatus.SKIPPED
                     trace.result = "ERROR: ${error.message}; completed actions were retained and must not be replayed."
                     trace.finished = System.currentTimeMillis()
+                    com.kevinluo.autoglm.util.DiagnosticLog.event("Tools", "command.skipped",
+                        "runId" to control.runId, "callId" to command.id, "errorType" to error.javaClass.name)
                     outputs += ComputerProtocol.functionOutput(command.id, trace.result)
                     frame = null
                     changed = true
                     visualOutput = false
-                } catch (error: Throwable) { trace.failed(error); throw error }
+                } catch (error: Throwable) {
+                    com.kevinluo.autoglm.util.DiagnosticLog.event("Tools", "command.failed",
+                        "runId" to control.runId, "callId" to command.id, "errorType" to error.javaClass.name)
+                    trace.failed(error)
+                    throw error
+                }
             }
             if (hasPendingMessage()) {
                 val answered = outputs.mapNotNull { it.string("call_id") }.toSet()

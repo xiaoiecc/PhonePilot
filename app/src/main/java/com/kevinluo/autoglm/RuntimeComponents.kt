@@ -93,7 +93,7 @@ class ComponentManager private constructor(private val context: Context) {
         phoneAgentInternal = PhoneAgent(
             tools = AndroidToolExecutor(AndroidComputerDriver(device, input, window),
                 FunctionToolBackend(device, input, appResolver, swipeGenerator, window),
-                  screenshots, historyManager, config.screenshotDelayMs, textEditor = input::editText,
+                  screenshots, historyManager, config.screenshotDelayMs, textEditor = input::editText, window = window,
                   beforeDeviceTools = { control ->
                       control.checkpoint()
                       if (!device.displays.state.background) {

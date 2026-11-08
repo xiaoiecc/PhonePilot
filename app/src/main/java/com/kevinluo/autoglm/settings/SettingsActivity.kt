@@ -276,6 +276,13 @@ class SettingsActivity : BaseActivity() {
         logSizeText = findViewById(R.id.logSizeText)
         btnExportLogs = findViewById(R.id.btnExportLogs)
         btnClearLogs = findViewById(R.id.btnClearLogs)
+        findViewById<MaterialSwitch>(R.id.switchDetailedDiagnostics).apply {
+            isChecked = settingsManager.isDetailedDiagnosticsEnabled()
+            setOnCheckedChangeListener { _, enabled ->
+                settingsManager.setDetailedDiagnosticsEnabled(enabled)
+                com.kevinluo.autoglm.util.DiagnosticLog.setDetailedEnabled(enabled)
+            }
+        }
 
         // Voice settings
         voiceModelStatus = findViewById(R.id.voiceModelStatus)

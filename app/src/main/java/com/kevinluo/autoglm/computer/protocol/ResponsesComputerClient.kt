@@ -78,32 +78,42 @@ class ResponsesComputerClient(
             .build()
         val operation = RequestOperation()
         check(activeOperation.compareAndSet(null, operation)) { "A computer request is already running" }
-        return try {
-            var attempt = 1
-            while (true) {
-                operation.checkActive()
-                try {
-                    val result = executeAttempt(request, operation, attempt)
+        return com.kevinluo.autoglm.util.DiagnosticLog.traceSuspend("Responses", "request",
+            "model" to config.modelName, "inputItems" to input.size,
+            "hasPreviousResponse" to (previousResponseId != null), "requestBytes" to body.toString().length,
+            "timeoutSeconds" to config.timeoutSeconds) {
+            try {
+                var attempt = 1
+                while (true) {
                     operation.checkActive()
-                    return result
-                } catch (error: IOException) {
-                    operation.checkActive()
-                    if (attempt >= ResponsesRetryPolicy.MAX_ATTEMPTS || !ResponsesRetryPolicy.retryable(error)) throw error
-                    val wait = ResponsesRetryPolicy.waitMillis(error, attempt, retryJitter())
-                    val category = when (error) {
-                        is OpenAiHttpException -> "http_${error.status}"
-                        is OpenAiTransportException -> error.category.name.lowercase()
-                        else -> "unknown"
+                    try {
+                        val result = executeAttempt(request, operation, attempt)
+                        operation.checkActive()
+                        com.kevinluo.autoglm.util.DiagnosticLog.event("Responses", "attempt.succeeded", "attempt" to attempt)
+                        return@traceSuspend result
+                    } catch (error: IOException) {
+                        operation.checkActive()
+                        if (attempt >= ResponsesRetryPolicy.MAX_ATTEMPTS || !ResponsesRetryPolicy.retryable(error)) throw error
+                        val wait = ResponsesRetryPolicy.waitMillis(error, attempt, retryJitter())
+                        val category = when (error) {
+                            is OpenAiHttpException -> "http_${error.status}"
+                            is OpenAiTransportException -> error.category.name.lowercase()
+                            else -> "unknown"
+                        }
+                        com.kevinluo.autoglm.util.DiagnosticLog.event("Responses", "attempt.retrying",
+                            "attempt" to attempt, "category" to category, "waitMs" to wait,
+                            "errorType" to error.javaClass.name)
+                        Logger.d("ResponsesComputerClient", "Retry $attempt/3; category=$category; wait_ms=$wait")
+                        awaitBackoff(operation, wait)
+                        attempt++
                     }
-                    Logger.d("ResponsesComputerClient", "Retry $attempt/3; category=$category; wait_ms=$wait")
-                    awaitBackoff(operation, wait)
-                    attempt++
                 }
+                @Suppress("UNREACHABLE_CODE")
+                error("Unreachable")
+            } finally {
+                activeOperation.compareAndSet(operation, null)
+                com.kevinluo.autoglm.util.DiagnosticLog.event("Responses", "request.released")
             }
-            @Suppress("UNREACHABLE_CODE")
-            error("Unreachable")
-        } finally {
-            activeOperation.compareAndSet(operation, null)
         }
     }
 
@@ -133,6 +143,9 @@ class ResponsesComputerClient(
                 if (!continuation.isActive) return@suspendCancellableCoroutine
                 call.enqueue(object : Callback {
                     override fun onFailure(call: Call, e: IOException) {
+                        com.kevinluo.autoglm.util.DiagnosticLog.event("Responses", "http.failed",
+                            "attempt" to attempt, "cancelled" to operation.cancelled.isCompleted,
+                            "errorType" to e.javaClass.name)
                         if (continuation.isActive) {
                             continuation.resumeWithException(
                                 if (operation.cancelled.isCompleted) CancellationException("Computer request cancelled")
@@ -143,6 +156,9 @@ class ResponsesComputerClient(
 
                     override fun onResponse(call: Call, response: Response) {
                         response.use {
+                            com.kevinluo.autoglm.util.DiagnosticLog.event("Responses", "http.response",
+                                "attempt" to attempt, "status" to response.code,
+                                "requestId" to response.header("x-request-id")?.takeIf { safeToken(it, "req_[a-zA-Z0-9_-]{1,100}") })
                             try {
                                 if (!response.isSuccessful) {
                                     // Preserve the server diagnostic after removing credentials and encoded payloads.

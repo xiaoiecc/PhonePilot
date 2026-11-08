@@ -88,7 +88,7 @@ internal object ToolCommandDecoder {
         require(text == null || operation in setOf("set_text", "append_text"))
         require(query == null || operation in setOf("find", "click_match"))
         require(matchMode == null || operation == "click_match")
-        require(scroll == null || operation == "find")
+        require(scroll == null || scroll == false || operation == "find")
         require(scope == null || operation in setOf("observe", "find"))
         require(start == null && end == null || operation == "set_selection")
         require(progress == null || operation == "set_progress")

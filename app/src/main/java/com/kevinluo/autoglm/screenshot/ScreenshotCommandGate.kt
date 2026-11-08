@@ -34,19 +34,22 @@ internal class ScreenshotCommandGate(
     private val occupied = AtomicBoolean(false)
     internal val isBusy: Boolean get() = occupied.get()
 
-    suspend fun <T> execute(timeoutMs: Long, command: () -> T): T {
+    suspend fun <T> execute(timeoutMs: Long, command: () -> T): T = com.kevinluo.autoglm.util.DiagnosticLog.traceSuspend(
+        "ScreenshotGate", "execute", "timeoutMs" to timeoutMs, "busyBefore" to isBusy) {
         require(timeoutMs > 0)
         currentCoroutineContext().ensureActive()
         if (!occupied.compareAndSet(false, true)) throw ScreenshotCaptureException("上一次截图请求尚未结束，请检查 Shizuku 后重试")
         var submitted = false
         try {
-            return withTimeout(timeoutMs) {
+            return@traceSuspend withTimeout(timeoutMs) {
                 suspendCancellableCoroutine { continuation ->
                     try {
                         submitted = true
                         executor.execute {
                             val result = runCatching(command)
                             occupied.set(false)
+                            com.kevinluo.autoglm.util.DiagnosticLog.event("ScreenshotGate", "binder.returned",
+                                "success" to (result.isSuccess), "busyAfter" to isBusy)
                             if (continuation.isActive) continuation.resumeWith(result)
                         }
                     } catch (error: Exception) {
@@ -56,6 +59,9 @@ internal class ScreenshotCommandGate(
                 }
             }
         } catch (error: TimeoutCancellationException) {
+            com.kevinluo.autoglm.util.DiagnosticLog.event("ScreenshotGate", "deadline",
+                "timeoutMs" to timeoutMs, "callerActive" to currentCoroutineContext().isActive,
+                "binderStillBusy" to isBusy)
             if (!currentCoroutineContext().isActive) throw error
             throw ScreenshotCaptureException("截图命令等待超时，任务已停止；请检查 Shizuku 后重试")
         } finally {

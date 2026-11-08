@@ -58,6 +58,8 @@ class RunCoordinator(
         var placementGeneration = 0L
         var placementRequest: ExecutionMode? = null
         var placementError: String? = null
+        var placementReturnMode: ExecutionMode? = null
+        var recoveryInput: ChatInput? = null
     }
 
     private var active: ActiveRun? = null
@@ -86,7 +88,12 @@ class RunCoordinator(
             if (running != null) {
                 if (forceNew || !running.stage.acceptsCommands || !running.job.isActive) return false
                 val interaction = running.interaction
-                if (resumePaused && (interaction != null || running.placementError != null)) return false
+                if (resumePaused && interaction != null) return false
+                if (resumePaused && running.recoveryInput != null) return false
+                if (resumePaused && running.placementError != null) {
+                    running.recoveryInput = input
+                    return requestExecutionMode(running.id, running.mode, event = null, resumeAfterRecovery = true)
+                }
                 if (interaction?.pending?.kind == InteractionKind.TEXT) {
                     if (attachments.isNotEmpty()) return false
                     running.pauses.remove(PauseReason.DRAFT)
@@ -123,8 +130,8 @@ class RunCoordinator(
                     owner.outcome = runner.run(input, continuing, Control(owner))
                 } catch (_: CancellationException) {
                     owner.outcome = RunOutcome(false, "任务已被用户取消", mutableSnapshot.value.stepNumber, runner.snapshot())
-                } catch (_: Exception) {
-                    owner.outcome = RunOutcome(false, "任务执行失败，请检查服务后重试", mutableSnapshot.value.stepNumber, runner.snapshot())
+                } catch (error: Exception) {
+                    owner.outcome = RunOutcome(false, error.stackTraceToString(), mutableSnapshot.value.stepNumber, runner.snapshot())
                 }
             }
             owner.job.invokeOnCompletion { finalize(owner) }
@@ -194,7 +201,15 @@ class RunCoordinator(
         changed
     }
 
-    fun resumeUser(): Boolean = removePause(PauseReason.USER)
+    fun resumeUser(): Boolean {
+        val recovery = synchronized(lock) {
+            val owner = active ?: return false
+            if (!owner.stage.acceptsCommands || !owner.job.isActive) return false
+            if (owner.placementError != null) owner.id to owner.mode else null
+        }
+        return if (recovery != null) requestExecutionMode(recovery.first, recovery.second, event = null, resumeAfterRecovery = true)
+            else removePause(PauseReason.USER)
+    }
     fun onEditorBlur(hasDraft: Boolean) { if (!hasDraft) removePause(PauseReason.DRAFT) }
 
     private fun removePause(reason: PauseReason): Boolean = synchronized(lock) {
@@ -206,9 +221,25 @@ class RunCoordinator(
     }
 
     /** The same device gate serializes placement with accepted device operations. */
-    fun requestExecutionMode(runId: String, mode: ExecutionMode): Boolean {
+    fun requestExecutionMode(runId: String, mode: ExecutionMode, event: ScreenEvent? = null): Boolean =
+        requestExecutionMode(runId, mode, event, resumeAfterRecovery = false)
+
+    private fun requestExecutionMode(
+        runId: String, mode: ExecutionMode, event: ScreenEvent?, resumeAfterRecovery: Boolean,
+    ): Boolean {
         val job = synchronized(lock) {
             val owner = active?.takeIf { it.id == runId && it.stage.acceptsCommands && it.job.isActive } ?: return false
+            when (event) {
+                ScreenEvent.SCREEN_OFF -> {
+                    if (owner.mode == ExecutionMode.BACKGROUND) return false
+                    owner.placementReturnMode = ExecutionMode.FOREGROUND
+                }
+                ScreenEvent.USER_PRESENT -> {
+                    if (owner.placementReturnMode == null) return false
+                    owner.placementReturnMode = null
+                }
+                null -> owner.placementReturnMode = null
+            }
             if (owner.placementRequest != null || owner.mode == mode && owner.placementError == null) return false
             owner.placementRequest = mode
             owner.placementError = null
@@ -225,6 +256,17 @@ class RunCoordinator(
                             if (active === owner && owner.stage.acceptsCommands) {
                                 owner.mode = mode
                                 owner.placementGeneration++
+                                val recoveryInput = owner.recoveryInput
+                                if (resumeAfterRecovery || recoveryInput != null) {
+                                    val accepted = recoveryInput == null || owner.runner.enqueueMessage(recoveryInput)
+                                    if (accepted) {
+                                        owner.recoveryInput = null
+                                        if (recoveryInput != null) owner.pauses.remove(PauseReason.DRAFT)
+                                        owner.pauses.remove(PauseReason.USER)
+                                    } else {
+                                        owner.placementError = "执行位置已恢复，但补充消息未被接受；请重试"
+                                    }
+                                }
                             }
                         }
                     }

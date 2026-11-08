@@ -19,7 +19,6 @@ internal object TraceActionMapper {
         fun y(value: Int) = normalized(value, requireNotNull(frame).originalHeight)
         return when (action) {
             is PreparedAction.Tap -> when {
-                action.longPress -> AgentAction.LongPress(x(action.point.x), y(action.point.y), 650)
                 action.doubleTap -> AgentAction.DoubleTap(x(action.point.x), y(action.point.y))
                 else -> AgentAction.Tap(x(action.point.x), y(action.point.y))
             }
@@ -61,7 +60,7 @@ internal class ToolTraceBatch(response: ComputerResponse, private val runId: Str
         var after: Screenshot? = null
         fun failed(error: Throwable) {
             status = if (error is CancellationException) HistoryToolStatus.CANCELLED else HistoryToolStatus.FAILED
-            result = error.message ?: error.javaClass.simpleName
+            result = error.stackTraceToString()
             finished = System.currentTimeMillis()
         }
     }

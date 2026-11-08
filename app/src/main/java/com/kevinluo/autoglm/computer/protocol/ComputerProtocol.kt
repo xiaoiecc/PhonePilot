@@ -349,13 +349,24 @@ object ComputerProtocol {
                 actions.forEach { action ->
                     val item = action as? JsonObject ?: throw ComputerProtocolException("Invalid android_computer action")
                     val type = item.requiredString("type")
+                    val allowed = when (type) {
+                        "click" -> setOf("type", "x", "y", "button")
+                        "double_click", "move" -> setOf("type", "x", "y")
+                        "drag" -> setOf("type", "path")
+                        "scroll" -> setOf("type", "x", "y", "scroll_x", "scroll_y")
+                        "keypress" -> setOf("type", "keys")
+                        "type" -> setOf("type", "text")
+                        "wait", "screenshot" -> setOf("type")
+                        else -> throw ComputerProtocolException("Unsupported android_computer action")
+                    }
+                    requireKeys("$name.$type", item, allowed)
                     fun requireIntegers(vararg keys: String) {
                         keys.forEach { key -> item.integer(key) ?: throw ComputerProtocolException("$type requires integer $key") }
                     }
                     when (type) {
                         "click" -> {
                             requireIntegers("x", "y")
-                            if (item.requiredString("button") !in setOf("left", "right", "wheel", "back", "forward")) {
+                            if (item.requiredString("button") !in setOf("left", "wheel", "back", "forward")) {
                                 throw ComputerProtocolException("Click button must match the official ComputerAction type")
                             }
                         }
@@ -604,17 +615,17 @@ object ComputerProtocol {
         put("anyOf", buildJsonArray {
             add(computerAction("click",
                 "x" to numberSchema("integer"), "y" to numberSchema("integer"),
-                "button" to stringSchema(setOf("left", "right", "wheel", "back", "forward")), "keys" to nullableKeysSchema()))
+                "button" to stringSchema(setOf("left", "wheel", "back", "forward"))))
             add(computerAction("double_click",
-                "x" to numberSchema("integer"), "y" to numberSchema("integer"), "keys" to nullableKeysSchema()))
-            add(computerAction("drag", "path" to dragPathSchema(), "keys" to nullableKeysSchema()))
+                "x" to numberSchema("integer"), "y" to numberSchema("integer")))
+            add(computerAction("drag", "path" to dragPathSchema()))
             add(computerAction("move",
-                "x" to numberSchema("integer"), "y" to numberSchema("integer"), "keys" to nullableKeysSchema()))
+                "x" to numberSchema("integer"), "y" to numberSchema("integer")))
             add(computerAction("scroll",
                 "x" to numberSchema("integer"), "y" to numberSchema("integer"),
-                "scroll_x" to numberSchema("integer"), "scroll_y" to numberSchema("integer"), "keys" to nullableKeysSchema()))
+                "scroll_x" to numberSchema("integer"), "scroll_y" to numberSchema("integer")))
             add(computerAction("keypress", "keys" to buildJsonObject {
-                put("type", "array"); put("items", stringSchema()); put("minItems", 1)
+                put("type", "array"); put("items", stringSchema()); put("minItems", 1); put("maxItems", 1)
             }))
             add(computerAction("type", "text" to stringSchema()))
             add(computerAction("wait"))
@@ -630,11 +641,6 @@ object ComputerProtocol {
         })
         put("required", JsonArray((listOf("type") + fields.map { it.first }).map(::JsonPrimitive)))
         put("additionalProperties", false)
-    }
-
-    private fun nullableKeysSchema() = buildJsonObject {
-        put("type", buildJsonArray { add(JsonPrimitive("array")); add(JsonPrimitive("null")) })
-        put("items", stringSchema())
     }
 
     private fun dragPathSchema() = buildJsonObject {
@@ -729,7 +735,7 @@ object ComputerProtocol {
             "For dynamic lists whose rows reorder while new messages arrive, use android_ui click_match with the observed row snapshot_id/node_id and a stable literal identity query. Use exact matching when the label is stable; if a description starts with the name followed by a delimiter and changing preview, copy the name AND delimiter as a prefix and set match_mode=prefix. The backend relocates a unique visible matching item within the same identified scroll container at execution time, never by old row position. Ambiguous or missing matches require another observation or clarification; never shorten a name to force a match. " +
             "Never infer hidden nodes or guess IDs. Whenever text cannot accurately explain the content, target or state, call android_screenshot; never guess. " +
             "Use android_computer for visual interaction only after seeing a current screenshot; use screenshot pixel coordinates. " +
-            "The screen is a touchscreen: left click taps, right click long presses, double click double taps. " +
+            "The screen is a touchscreen: left click taps and double click double taps. Use android_gesture for long presses; right click is not a long-press shortcut. " +
             "Only straight android_computer drag paths are supported. Scroll uses signed pixel deltas. Its type action appends text. " +
             "Keypress supports one Android key at a time: BACK, HOME, ENTER, BACKSPACE, TAB, ESCAPE, " +
             "arrow keys, SPACE, or alphanumeric keys. Modifier chords and hover/move are unsupported. " +

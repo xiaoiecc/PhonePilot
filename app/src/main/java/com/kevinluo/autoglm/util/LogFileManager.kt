@@ -197,6 +197,13 @@ object LogFileManager {
     private fun sanitizeLogContent(content: String): String {
         var sanitized = content
 
+        sanitized = sanitized
+            .replace(Regex("(?i)Bearer\\s+\\S+"), "[redacted]")
+            .replace(Regex("\\bsk-[A-Za-z0-9_-]+"), "[redacted]")
+            .replace(Regex("(?i)(api[_-]?key|authorization|proxy-authorization|cookie|password|passwd|secret|token)\\s*[:=]\\s*[^\\s,;}]+"), "$1=[redacted]")
+            .replace(Regex("data:image/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=\\r\\n]+"), "[encoded-data]")
+            .replace(Regex("[A-Za-z0-9+/=]{128,}"), "[encoded-data]")
+
         // ==================== Remove app list entries ====================
         // Match lines like "  信息 -> com.android.mms" or "  ... and 118 more apps"
         sanitized =

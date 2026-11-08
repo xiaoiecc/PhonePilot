@@ -56,6 +56,14 @@ class ToolCommandDecoderTest {
         }
     }
 
+    @Test fun `explicit false scroll flag is a no-op outside find while true is rejected`() {
+        assertEquals(UiCommand.Observe(null, null),
+            ToolCommandDecoder.ui(obj("""{"operation":"observe","search_scroll":false}""")))
+        assertThrows(Exception::class.java) {
+            ToolCommandDecoder.ui(obj("""{"operation":"observe","search_scroll":true}"""))
+        }
+    }
+
     @Test fun `invalid AX combinations and primitive coercion are rejected at decode boundary`() {
         listOf(
             """{"operation":"click","snapshot_id":"s","node_id":"n","progress":0.2}""",

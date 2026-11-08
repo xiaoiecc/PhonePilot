@@ -44,10 +44,15 @@ internal suspend fun <T> withOverlayHidden(
     val initial = async(start = CoroutineStart.UNDISPATCHED) { checkpoint() }
     awaitVisibleCheckpoint(initial)
     val wasVisible = if (window == null) false else withContext(uiDispatcher) { window.isVisible() }
+    com.kevinluo.autoglm.util.DiagnosticLog.event("OverlayScope", "started",
+        "wasVisible" to wasVisible, "scoped" to (scoped != null), "hideDelayMs" to hideDelayMs,
+        "showDelayMs" to showDelayMs, "bringToFront" to bringToFront)
     var lease: AutoCloseable? = null
     var hidden = false
     suspend fun restore() {
         if (lease != null || hidden) {
+            com.kevinluo.autoglm.util.DiagnosticLog.event("OverlayScope", "restore.started",
+                "hasLease" to (lease != null), "legacyHidden" to hidden)
             withContext(NonCancellable + uiDispatcher) {
                 delay(showDelayMs)
                 val owned = lease
@@ -56,6 +61,7 @@ internal suspend fun <T> withOverlayHidden(
                 else if (bringToFront) window?.showAndBringToFront() else window?.show()
             }
             hidden = false
+            com.kevinluo.autoglm.util.DiagnosticLog.event("OverlayScope", "restore.completed")
         }
     }
     try {
