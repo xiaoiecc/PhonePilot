@@ -40,7 +40,8 @@ class SettingsFragmentPropertyTest :
                 Arb.boolean(),
                 Arb.boolean(),
                 Arb.boolean(),
-            ) { shizuku, overlay, keyboard, battery ->
+                Arb.boolean(),
+            ) { shizuku, overlay, keyboard, battery, accessibility ->
                 val initialState = PermissionStates()
 
                 // Apply updates one by one
@@ -49,12 +50,14 @@ class SettingsFragmentPropertyTest :
                 state = applyPermissionUpdate(state, PermissionType.OVERLAY, overlay)
                 state = applyPermissionUpdate(state, PermissionType.KEYBOARD, keyboard)
                 state = applyPermissionUpdate(state, PermissionType.BATTERY, battery)
+                state = applyPermissionUpdate(state, PermissionType.ACCESSIBILITY, accessibility)
 
                 // Verify: final state reflects all updates
                 state.shizuku shouldBe shizuku
                 state.overlay shouldBe overlay
                 state.keyboard shouldBe keyboard
                 state.battery shouldBe battery
+                state.accessibility shouldBe accessibility
             }
         }
 
@@ -65,16 +68,18 @@ class SettingsFragmentPropertyTest :
                 Arb.boolean(),
                 Arb.boolean(),
                 Arb.boolean(),
-            ) { shizuku, overlay, keyboard, battery ->
+                Arb.boolean(),
+            ) { shizuku, overlay, keyboard, battery, accessibility ->
                 val state =
                     PermissionStates(
                         shizuku = shizuku,
                         overlay = overlay,
                         keyboard = keyboard,
                         battery = battery,
+                        accessibility = accessibility,
                     )
 
-                val expectedCount = listOf(shizuku, overlay, keyboard, battery).count { it }
+                val expectedCount = listOf(shizuku, overlay, keyboard, battery, accessibility).count { it }
 
                 // Verify: granted count matches
                 computeGrantedCount(state) shouldBe expectedCount
@@ -88,16 +93,18 @@ class SettingsFragmentPropertyTest :
                 Arb.boolean(),
                 Arb.boolean(),
                 Arb.boolean(),
-            ) { shizuku, overlay, keyboard, battery ->
+                Arb.boolean(),
+            ) { shizuku, overlay, keyboard, battery, accessibility ->
                 val state =
                     PermissionStates(
                         shizuku = shizuku,
                         overlay = overlay,
                         keyboard = keyboard,
                         battery = battery,
+                        accessibility = accessibility,
                     )
 
-                val expectedAllGranted = shizuku && overlay && keyboard && battery
+                val expectedAllGranted = shizuku && overlay && keyboard && battery && accessibility
 
                 // Verify: all granted detection
                 computeAllPermissionsGranted(state) shouldBe expectedAllGranted
@@ -233,19 +240,20 @@ private fun applyPermissionUpdate(state: PermissionStates, type: PermissionType,
         PermissionType.OVERLAY -> state.copy(overlay = granted)
         PermissionType.KEYBOARD -> state.copy(keyboard = granted)
         PermissionType.BATTERY -> state.copy(battery = granted)
+        PermissionType.ACCESSIBILITY -> state.copy(accessibility = granted)
     }
 
 /**
  * Computes the count of granted permissions.
  */
 private fun computeGrantedCount(state: PermissionStates): Int =
-    listOf(state.shizuku, state.overlay, state.keyboard, state.battery).count { it }
+    listOf(state.shizuku, state.overlay, state.keyboard, state.battery, state.accessibility).count { it }
 
 /**
  * Computes whether all permissions are granted.
  */
 private fun computeAllPermissionsGranted(state: PermissionStates): Boolean =
-    state.shizuku && state.overlay && state.keyboard && state.battery
+    state.shizuku && state.overlay && state.keyboard && state.battery && state.accessibility
 
 /**
  * Simulates persisting and loading a model config.

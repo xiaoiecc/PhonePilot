@@ -36,6 +36,9 @@ class AutoGLMApplication : Application() {
 
         // Initialize log file manager for file-based logging
         LogFileManager.init(this)
+        com.kevinluo.autoglm.util.DiagnosticLog.setDetailedEnabled(
+            SettingsManager.getInstance(this).isDetailedDiagnosticsEnabled())
+        com.kevinluo.autoglm.util.DiagnosticLog.event("App", "process.created")
 
         // Import dev profiles if available (debug builds only)
         // Credentials are configured on-device, never imported from APK assets.
@@ -49,16 +52,21 @@ class AutoGLMApplication : Application() {
         // Initialize TaskExecutionManager (after ComponentManager is available)
         TaskExecutionManager.initialize(this)
         ShizukuConnectionManager.initialize(this)
+        com.kevinluo.autoglm.display.ScreenModeController.initialize(this)
 
         registerActivityLifecycleCallbacks(
             object : ActivityLifecycleCallbacks {
                 override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {
-                    // No action needed
+                    com.kevinluo.autoglm.util.DiagnosticLog.event("Activity", "created",
+                        "activity" to activity.javaClass.name, "hasSavedState" to (savedInstanceState != null),
+                        "countBefore" to activityCount)
                 }
 
                 override fun onActivityStarted(activity: Activity) {
                     activityCount++
                     Logger.d(TAG, "Activity started: ${activity.localClassName}, count: $activityCount")
+                    com.kevinluo.autoglm.util.DiagnosticLog.event("Activity", "started",
+                        "activity" to activity.javaClass.name, "count" to activityCount)
 
                     // App came to foreground
                     if (activityCount == 1) {
@@ -67,17 +75,22 @@ class AutoGLMApplication : Application() {
                 }
 
                 override fun onActivityResumed(activity: Activity) {
+                    com.kevinluo.autoglm.util.DiagnosticLog.event("Activity", "resumed",
+                        "activity" to activity.javaClass.name, "count" to activityCount)
                     // 同步修复状态
                     KeepAliveManager.syncFixState(this@AutoGLMApplication)
                 }
 
                 override fun onActivityPaused(activity: Activity) {
-                    // No action needed
+                    com.kevinluo.autoglm.util.DiagnosticLog.event("Activity", "paused",
+                        "activity" to activity.javaClass.name, "count" to activityCount)
                 }
 
                 override fun onActivityStopped(activity: Activity) {
                     activityCount--
                     Logger.d(TAG, "Activity stopped: ${activity.localClassName}, count: $activityCount")
+                    com.kevinluo.autoglm.util.DiagnosticLog.event("Activity", "stopped",
+                        "activity" to activity.javaClass.name, "count" to activityCount)
 
                     // App went to background
                     if (activityCount == 0) {
@@ -86,11 +99,14 @@ class AutoGLMApplication : Application() {
                 }
 
                 override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) {
-                    // No action needed
+                    com.kevinluo.autoglm.util.DiagnosticLog.event("Activity", "stateSaved",
+                        "activity" to activity.javaClass.name, "count" to activityCount)
                 }
 
                 override fun onActivityDestroyed(activity: Activity) {
-                    // No action needed
+                    com.kevinluo.autoglm.util.DiagnosticLog.event("Activity", "destroyed",
+                        "activity" to activity.javaClass.name, "count" to activityCount,
+                        "changingConfigurations" to activity.isChangingConfigurations)
                 }
             },
         )

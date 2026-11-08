@@ -31,7 +31,8 @@ import org.junit.jupiter.api.Assertions.*
 /** Real coordinator, Responses runner, dispatcher, function backend and input driver. Only IO is mocked. */
 @OptIn(ExperimentalCoroutinesApi::class)
 internal class RunnerHarness(val scope: TestScope, maxSteps: Int = 20, service: PhoneAccessibilityService? = null,
-    beforeDeviceTools: suspend (RunControl) -> Unit = { it.emit(RunProgress.DeviceToolsRequested) }) {
+    beforeDeviceTools: suspend (RunControl) -> Unit = { it.emit(RunProgress.DeviceToolsRequested) },
+    window: com.kevinluo.autoglm.screenshot.FloatingWindowController? = null) {
     val client = mockk<ResponsesComputerClient>(relaxed = true)
     val device = mockk<DeviceExecutor>()
     val input = mockk<TextInputManager>()
@@ -66,7 +67,7 @@ internal class RunnerHarness(val scope: TestScope, maxSteps: Int = 20, service: 
         val driver = AndroidComputerDriver(device, input)
         val functions = FunctionToolBackend(device, input, apps, swipes) { null }
         val dispatcher = AndroidToolExecutor(driver, functions, screenshots, history, 0,
-            beforeDeviceTools = beforeDeviceTools) { service }
+            beforeDeviceTools = beforeDeviceTools, accessibility = { service }, window = { window })
         runner = PhoneAgent(dispatcher, AgentConfig(maxSteps = maxSteps, screenshotDelayMs = 0), history, client,
             imageLoader = { com.kevinluo.autoglm.computer.protocol.ResponsesImage(it.mimeType,
                 "attachment-${java.io.File(it.path).name}") })

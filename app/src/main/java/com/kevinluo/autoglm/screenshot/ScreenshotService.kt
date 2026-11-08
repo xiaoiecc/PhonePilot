@@ -362,6 +362,9 @@ class ScreenshotService(
 
     private suspend fun screenshotCommand(phase: String, argv: List<String>, timeoutMs: Long): String {
         Logger.d(TAG, "Screenshot IPC phase=$phase started")
+        com.kevinluo.autoglm.util.DiagnosticLog.event("Screenshot", "ipc.started",
+            "phase" to phase, "executable" to argv.firstOrNull(), "argumentCount" to argv.size,
+            "timeoutMs" to timeoutMs, "background" to (backgroundCapture != null))
         val started = System.nanoTime()
         val result = try {
             screenshotCommands.execute(timeoutMs + 1000) {
@@ -375,6 +378,11 @@ class ScreenshotService(
         } catch (_: Exception) {
             throw ScreenshotCaptureException("截图设备连接已失效，任务已停止；请检查 Shizuku 后重试")
         }
+        com.kevinluo.autoglm.util.DiagnosticLog.event("Screenshot", "ipc.returned",
+            "phase" to phase, "elapsedMs" to ((System.nanoTime() - started) / 1_000_000),
+            "exitCode" to result.exitCode, "timedOut" to result.timedOut,
+            "outputTruncated" to result.outputTruncated, "stdoutBytes" to result.stdout.length,
+            "stderrBytes" to result.stderr.length)
         requireSuccessfulScreenshotCommand(result)
         Logger.d(TAG, "Screenshot IPC phase=$phase completed in ${(System.nanoTime() - started) / 1_000_000}ms")
         return result.stdout

@@ -44,16 +44,22 @@ object FloatingWindowStateManager {
     }
 
     /** Acquire on Main so the physical host is hidden before capture/input can start. */
-    fun acquireHide(context: Context): AutoCloseable = acquireLease(context, policy::acquireHide)
-    fun acquirePauseVisibility(context: Context): AutoCloseable = acquireLease(context, policy::acquirePauseVisibility)
+    fun acquireHide(context: Context): AutoCloseable = acquireLease(context, "hide", policy::acquireHide)
+    fun acquirePauseVisibility(context: Context): AutoCloseable = acquireLease(context, "pauseVisibility", policy::acquirePauseVisibility)
 
-    private fun acquireLease(context: Context, acquire: () -> AutoCloseable): AutoCloseable {
+    private fun acquireLease(context: Context, kind: String, acquire: () -> AutoCloseable): AutoCloseable {
         initialize(context)
         val lease = acquire()
+        com.kevinluo.autoglm.util.DiagnosticLog.event("OverlayLease", "acquired", "kind" to kind,
+            "hiddenLeases" to snapshot.value.hiddenLeaseCount, "pauseLeases" to snapshot.value.pauseVisibilityCount)
         reconcile(policy.snapshot.value)
         return AutoCloseable {
+            com.kevinluo.autoglm.util.DiagnosticLog.event("OverlayLease", "releasing", "kind" to kind,
+                "hiddenLeases" to snapshot.value.hiddenLeaseCount, "pauseLeases" to snapshot.value.pauseVisibilityCount)
             lease.close()
             reconcile(policy.snapshot.value)
+            com.kevinluo.autoglm.util.DiagnosticLog.event("OverlayLease", "released", "kind" to kind,
+                "hiddenLeases" to snapshot.value.hiddenLeaseCount, "pauseLeases" to snapshot.value.pauseVisibilityCount)
         }
     }
 
@@ -64,8 +70,16 @@ object FloatingWindowStateManager {
 
     private fun reconcile(state: OverlaySnapshot) {
         val application = context ?: return
-        if (state.runActive) ensureServiceReady()
         val service = FloatingWindowService.getInstance()
+        com.kevinluo.autoglm.util.DiagnosticLog.event("Overlay", "reconcile",
+            "userEnabled" to state.userEnabled, "appInForeground" to state.appInForeground,
+            "visible" to state.visible, "minimized" to state.minimized,
+            "runId" to state.runId, "runActive" to state.runActive,
+            "deviceToolsRequested" to state.deviceToolsRequested,
+            "completionVisible" to state.completionVisible,
+            "hiddenLeases" to state.hiddenLeaseCount, "pauseLeases" to state.pauseVisibilityCount,
+            "servicePresent" to (service != null), "windowAttached" to (service?.isVisible() == true))
+        if (state.runActive) ensureServiceReady()
         if (state.visible) {
             if (service == null) ContextCompat.startForegroundService(application, Intent(application, FloatingWindowService::class.java))
             else service.show()

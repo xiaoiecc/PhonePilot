@@ -114,7 +114,7 @@ class PlacementCoordinatorTest {
         c.stop(); runCurrent()
     }
 
-    @Test fun `switch failure pauses and only explicit recovery can unblock execution`() = runTest {
+    @Test fun `switch failure pauses and resume explicitly verifies recovery before execution`() = runTest {
         val runner = Runner()
         var broken = true
         val c = RunCoordinator(this, { runner }, switchPlacement = { _, _ -> check(!broken) })
@@ -123,13 +123,48 @@ class PlacementCoordinatorTest {
         c.requestExecutionMode(id, ExecutionMode.BACKGROUND); runCurrent()
         assertEquals(RunPhase.PAUSED, c.snapshot.value.phase)
         assertNotNull(c.snapshot.value.placementError)
-        assertFalse(c.resumeUser())
-        assertFalse(c.submit("resume", resumePaused = true))
-        broken = false
-        assertTrue(c.requestExecutionMode(id, ExecutionMode.FOREGROUND)); runCurrent()
-        assertNull(c.snapshot.value.placementError)
+        assertTrue(c.resumeUser()); runCurrent()
         assertEquals(RunPhase.PAUSED, c.snapshot.value.phase)
-        assertTrue(c.resumeUser())
+        assertNotNull(c.snapshot.value.placementError)
+        broken = false
+        assertTrue(c.resumeUser()); runCurrent()
+        assertNull(c.snapshot.value.placementError)
+        assertEquals(RunPhase.RUNNING, c.snapshot.value.phase)
+        c.stop(); runCurrent()
+    }
+
+    @Test fun `send and resume queues input until placement recovery succeeds without replaying it`() = runTest {
+        val runner = Runner()
+        var broken = true
+        val c = RunCoordinator(this, { runner }, switchPlacement = { _, _ -> check(!broken) })
+        c.submit("start"); runCurrent()
+        val id = c.snapshot.value.runId!!
+        c.requestExecutionMode(id, ExecutionMode.BACKGROUND); runCurrent()
+        assertTrue(c.submit("continue after recovery", resumePaused = true))
+        assertEquals(0, runner.messages)
+        runCurrent()
+        assertEquals(RunPhase.PAUSED, c.snapshot.value.phase)
+        assertEquals(0, runner.messages)
+        assertFalse(c.submit("duplicate", resumePaused = true))
+        broken = false
+        assertTrue(c.resumeUser()); runCurrent()
+        assertEquals(RunPhase.RUNNING, c.snapshot.value.phase)
+        assertEquals(1, runner.messages)
+        c.stop(); runCurrent()
+    }
+
+    @Test fun `screen off migrates to background and only that automatic migration returns on unlock`() = runTest {
+        val runner = Runner()
+        val modes = mutableListOf<ExecutionMode>()
+        val c = RunCoordinator(this, { runner }, switchPlacement = { _, mode -> modes += mode })
+        c.submit("start"); runCurrent()
+        val id = c.snapshot.value.runId!!
+        assertTrue(c.requestExecutionMode(id, ExecutionMode.BACKGROUND, ScreenEvent.SCREEN_OFF)); runCurrent()
+        assertEquals(listOf(ExecutionMode.BACKGROUND), modes)
+        assertTrue(c.requestExecutionMode(id, ExecutionMode.FOREGROUND, ScreenEvent.USER_PRESENT)); runCurrent()
+        assertEquals(listOf(ExecutionMode.BACKGROUND, ExecutionMode.FOREGROUND), modes)
+        assertTrue(c.requestExecutionMode(id, ExecutionMode.BACKGROUND)); runCurrent()
+        assertFalse(c.requestExecutionMode(id, ExecutionMode.FOREGROUND, ScreenEvent.USER_PRESENT))
         c.stop(); runCurrent()
     }
 

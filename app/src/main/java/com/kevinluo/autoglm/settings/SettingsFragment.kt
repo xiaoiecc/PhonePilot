@@ -49,6 +49,7 @@ import com.kevinluo.autoglm.model.ModelConfig
 import com.kevinluo.autoglm.ui.MainViewModel
 import com.kevinluo.autoglm.ui.PermissionStates
 import com.kevinluo.autoglm.ui.PermissionType
+import com.kevinluo.autoglm.accessibility.AccessibilityPermission
 import com.kevinluo.autoglm.util.LogFileManager
 import com.kevinluo.autoglm.util.Logger
 import com.kevinluo.autoglm.util.applyPrimaryButtonColors
@@ -86,6 +87,7 @@ class SettingsFragment : Fragment() {
     private lateinit var permissionOverlay: View
     private lateinit var permissionKeyboard: View
     private lateinit var permissionBattery: View
+    private lateinit var permissionAccessibility: View
 
     // Profile selector views
     private lateinit var profileSelectorLayout: TextInputLayout
@@ -222,6 +224,7 @@ class SettingsFragment : Fragment() {
         permissionOverlay = view.findViewById(R.id.permissionOverlay)
         permissionKeyboard = view.findViewById(R.id.permissionKeyboard)
         permissionBattery = view.findViewById(R.id.permissionBattery)
+        permissionAccessibility = view.findViewById(R.id.permissionAccessibility)
 
         // Profile selector
         profileSelectorLayout = view.findViewById(R.id.profileSelectorLayout)
@@ -274,6 +277,13 @@ class SettingsFragment : Fragment() {
         logSizeText = view.findViewById(R.id.logSizeText)
         btnExportLogs = view.findViewById(R.id.btnExportLogs)
         btnClearLogs = view.findViewById(R.id.btnClearLogs)
+        view.findViewById<MaterialSwitch>(R.id.switchDetailedDiagnostics).apply {
+            isChecked = settingsManager.isDetailedDiagnosticsEnabled()
+            setOnCheckedChangeListener { _, enabled ->
+                settingsManager.setDetailedDiagnosticsEnabled(enabled)
+                com.kevinluo.autoglm.util.DiagnosticLog.setDetailedEnabled(enabled)
+            }
+        }
 
         // Voice settings
         voiceModelStatus = view.findViewById(R.id.voiceModelStatus)
@@ -302,6 +312,11 @@ class SettingsFragment : Fragment() {
             permissionBattery,
             getString(R.string.battery_opt_title),
             R.drawable.ic_battery,
+        )
+        setupPermissionItem(
+            permissionAccessibility,
+            getString(R.string.accessibility_permission_title),
+            R.drawable.ic_touch,
         )
     }
 
@@ -472,6 +487,9 @@ class SettingsFragment : Fragment() {
         permissionBattery.findViewById<Button>(R.id.btnPermissionAction).setOnClickListener {
             requestBatteryOptimization()
         }
+        permissionAccessibility.findViewById<Button>(R.id.btnPermissionAction).setOnClickListener {
+            startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+        }
     }
 
     /**
@@ -509,6 +527,7 @@ class SettingsFragment : Fragment() {
                 overlay = Settings.canDrawOverlays(context),
                 keyboard = isKeyboardEnabled(),
                 battery = isBatteryOptimizationIgnored(),
+                accessibility = AccessibilityPermission.isServiceReady(context),
             )
         viewModel.updateAllPermissionStates(states)
     }
@@ -537,6 +556,11 @@ class SettingsFragment : Fragment() {
             states.battery,
             getString(R.string.battery_opt_request),
         )
+        updatePermissionItemUI(
+            permissionAccessibility,
+            states.accessibility,
+            getString(R.string.accessibility_permission_request),
+        )
 
         // Update summary
         val grantedCount =
@@ -545,12 +569,13 @@ class SettingsFragment : Fragment() {
                 states.overlay,
                 states.keyboard,
                 states.battery,
+                states.accessibility,
             ).count { it }
         permissionsSummary.text =
-            if (grantedCount == 4) {
+            if (grantedCount == 5) {
                 getString(R.string.permissions_summary_all_granted)
             } else {
-                getString(R.string.permissions_summary_partial, grantedCount, 4)
+                getString(R.string.permissions_summary_partial, grantedCount, 5)
             }
     }
 

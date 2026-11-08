@@ -50,6 +50,7 @@ enum class RunPhase {
 
 enum class PauseReason { USER, DRAFT }
 enum class ExecutionMode { FOREGROUND, BACKGROUND }
+enum class ScreenEvent { SCREEN_OFF, USER_PRESENT }
 
 /** A changed observation must be regenerated, never replayed against a new display. */
 class ExecutionTargetChangedException : IllegalStateException("执行位置已变化；原操作未执行，请重新观察并生成操作")

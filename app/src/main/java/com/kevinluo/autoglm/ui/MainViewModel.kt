@@ -28,6 +28,7 @@ data class PermissionStates(
     val overlay: Boolean = false,
     val keyboard: Boolean = false,
     val battery: Boolean = false,
+    val accessibility: Boolean = false,
 )
 
 /**
@@ -45,6 +46,9 @@ enum class PermissionType {
 
     /** Battery optimization exemption. */
     BATTERY,
+
+    /** Accessibility service enabled and connected. */
+    ACCESSIBILITY,
 }
 
 /**
@@ -296,6 +300,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 PermissionType.OVERLAY -> _permissionStates.value.copy(overlay = granted)
                 PermissionType.KEYBOARD -> _permissionStates.value.copy(keyboard = granted)
                 PermissionType.BATTERY -> _permissionStates.value.copy(battery = granted)
+                PermissionType.ACCESSIBILITY -> _permissionStates.value.copy(accessibility = granted)
             }
     }
 

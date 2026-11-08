@@ -15,6 +15,8 @@
     <string name="permission_action_enable">启用</string>
     <string name="permission_granted">已授权</string>
     <string name="permission_not_granted">未授权</string>
+    <string name="accessibility_permission_title">无障碍服务</string>
+    <string name="accessibility_permission_request">开启无障碍服务</string>
     
     <!-- Shizuku Status -->
     <string name="shizuku_status_title">Shizuku 状态</string>
@@ -253,6 +255,8 @@
     <!-- Debug Logs -->
     <string name="settings_debug_logs">调试日志</string>
     <string name="settings_debug_logs_description">导出日志用于问题排查</string>
+    <string name="settings_detailed_diagnostics">详细诊断模式</string>
+    <string name="settings_detailed_diagnostics_description">记录各模块状态、关键变量、调用耗时与完整异常；敏感凭据和图片内容仍会脱敏</string>
     <string name="settings_debug_logs_size">日志大小: %s</string>
     <string name="settings_export_logs">导出日志</string>
     <string name="settings_clear_logs">清空</string>

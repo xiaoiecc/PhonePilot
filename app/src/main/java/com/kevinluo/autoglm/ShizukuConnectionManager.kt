@@ -58,8 +58,14 @@ object ShizukuConnectionManager {
     /** Called on foreground/permission grant; automatic retries never request permission. */
     fun refresh() {
         val event = generations.supersedeEvents()
+        com.kevinluo.autoglm.util.DiagnosticLog.event("Shizuku", "refresh.requested",
+            "revision" to event.revision, "status" to mutableStatus.value,
+            "binderAlive" to (binder?.isBinderAlive == true), "connectionPresent" to (connection != null))
         main.post {
-            if (!generations.isCurrent(event)) return@post
+            if (!generations.isCurrent(event)) {
+                com.kevinluo.autoglm.util.DiagnosticLog.event("Shizuku", "refresh.stale", "revision" to event.revision)
+                return@post
+            }
             retry.reset()
             retryTask?.let(main::removeCallbacks)
             retryTask = null
@@ -74,9 +80,13 @@ object ShizukuConnectionManager {
 
     private fun connect() {
         val application = context ?: return
+        com.kevinluo.autoglm.util.DiagnosticLog.event("Shizuku", "connect.started",
+            "status" to mutableStatus.value, "available" to available(),
+            "binderAlive" to (binder?.isBinderAlive == true), "connectionPresent" to (connection != null))
         if (!available()) {
             detach()
             mutableStatus.value = if (Shizuku.pingBinder()) ShizukuStatus.NO_PERMISSION else ShizukuStatus.NOT_RUNNING
+            com.kevinluo.autoglm.util.DiagnosticLog.event("Shizuku", "connect.unavailable", "status" to mutableStatus.value)
             return
         }
         if (binder?.isBinderAlive == true) {
@@ -87,6 +97,7 @@ object ShizukuConnectionManager {
         // A pending attempt owns its callback until connected or its deadline expires.
         if (connection != null) return
         val generation = generations.beginAttempt()
+        com.kevinluo.autoglm.util.DiagnosticLog.event("Shizuku", "bind.started", "attemptId" to generation.id)
         val attempt = object : ServiceConnection {
             override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
                 val delivery = generations.beginBinding(generation, service) ?: return
@@ -124,6 +135,9 @@ object ShizukuConnectionManager {
                             if (service.isBinderAlive) retry.resetIfStable()
                         }.also { main.postDelayed(it, ServiceReconnectPolicy.STABILITY_WINDOW_MS) }
                         Logger.i(TAG, "UserService connected")
+                        com.kevinluo.autoglm.util.DiagnosticLog.event("Shizuku", "connected",
+                            "attemptId" to generation.id, "bindingId" to delivery.id,
+                            "binderAlive" to service.isBinderAlive, "status" to mutableStatus.value)
                     } catch (error: Exception) {
                         Logger.e(TAG, "UserService connection initialization failed", error)
                         disconnected(this, generation)
@@ -156,15 +170,21 @@ object ShizukuConnectionManager {
     }
 
     private fun disconnected(attempt: ServiceConnection, generation: ConnectionGenerations.Attempt) {
-        if (!generations.isCurrent(generation) || connection !== attempt) return
+        if (!generations.isCurrent(generation) || connection !== attempt) {
+            com.kevinluo.autoglm.util.DiagnosticLog.event("Shizuku", "disconnect.stale", "attemptId" to generation.id)
+            return
+        }
         detach()
         mutableStatus.value = ShizukuStatus.NOT_RUNNING
+        com.kevinluo.autoglm.util.DiagnosticLog.event("Shizuku", "disconnected", "attemptId" to generation.id)
         if (!available()) {
             mutableStatus.value = if (Shizuku.pingBinder()) ShizukuStatus.NO_PERMISSION else ShizukuStatus.NOT_RUNNING
             return
         }
         val delay = retry.nextDelayMs() ?: return
         val event = generations.capture()
+        com.kevinluo.autoglm.util.DiagnosticLog.event("Shizuku", "retry.scheduled",
+            "attemptId" to generation.id, "revision" to event.revision, "delayMs" to delay)
         retryTask = Runnable {
             if (!generations.isCurrent(event)) return@Runnable
             retryTask = null

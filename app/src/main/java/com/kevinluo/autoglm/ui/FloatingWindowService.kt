@@ -139,6 +139,8 @@ class FloatingWindowService : Service(), ScopedFloatingWindowController {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        windowDiagnostic("service.started", "startId" to startId, "intentFlags" to flags,
+            "action" to intent?.action, "overlayAllowed" to canDrawOverlays(this))
         startOverlayForeground()
         if (floatingView == null && canDrawOverlays(this)) createWindowView()
         if (FloatingWindowStateManager.shouldBeVisible()) show()
@@ -157,10 +159,12 @@ class FloatingWindowService : Service(), ScopedFloatingWindowController {
             .setOngoing(true).setOnlyAlertOnce(true).setPriority(NotificationCompat.PRIORITY_LOW).build()
         ServiceCompat.startForeground(this, 2003, notification,
             if (Build.VERSION.SDK_INT >= 34) ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE else 0)
+        windowDiagnostic("service.foreground")
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
     override fun onDestroy() {
+        windowDiagnostic("service.destroying")
         instance = null
         serviceScope.cancel()
         sizeAnimator?.cancel()
@@ -176,27 +180,39 @@ class FloatingWindowService : Service(), ScopedFloatingWindowController {
     override fun isVisible(): Boolean = isAttached.get()
     override fun hide() {
         serviceScope.launch {
+            windowDiagnostic("host.hide.started")
             sizeAnimator?.cancel()
             sizeAnimator = null
             clearInputFocus()
             removeWindowInternal()
+            windowDiagnostic("host.hide.completed")
         }
     }
     override fun show() {
         serviceScope.launch {
-            if (!FloatingWindowStateManager.shouldBeVisible()) return@launch
+            windowDiagnostic("host.show.started")
+            if (!FloatingWindowStateManager.shouldBeVisible()) {
+                windowDiagnostic("host.show.rejected")
+                return@launch
+            }
             if (floatingView == null) createWindowView()
             if (!isAttached.get()) addWindowInternal()
             render()
+            windowDiagnostic("host.show.completed")
         }
     }
     override fun showAndBringToFront() {
         serviceScope.launch {
-            if (!FloatingWindowStateManager.shouldBeVisible()) return@launch
+            windowDiagnostic("host.bringToFront.started")
+            if (!FloatingWindowStateManager.shouldBeVisible()) {
+                windowDiagnostic("host.bringToFront.rejected")
+                return@launch
+            }
             if (floatingView == null) createWindowView()
             if (isAttached.get()) removeWindowInternal()
             addWindowInternal()
             render()
+            windowDiagnostic("host.bringToFront.completed")
         }
     }
 
@@ -264,9 +280,17 @@ class FloatingWindowService : Service(), ScopedFloatingWindowController {
         rebindDraft(state.conversationId)
         val minimized = FloatingWindowStateManager.snapshot.value.minimized
         val input = view.findViewById<EditText>(R.id.task_input)
-        val presentation = CapsulePresentation.from(state.run, minimized, detailsExpanded, input.text.isNotBlank())
-        val switching = TaskExecutionManager.placementSwitching.value
         val inBackground = TaskExecutionManager.executionMode.value == ExecutionMode.BACKGROUND
+        val presentation = CapsulePresentation.from(state.run, minimized, detailsExpanded, input.text.isNotBlank(), inBackground)
+        val switching = TaskExecutionManager.placementSwitching.value
+        layoutParams?.let { params ->
+            val flags = if (presentation.keepScreenOn) params.flags or WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
+                else params.flags and WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON.inv()
+            if (flags != params.flags) {
+                params.flags = flags
+                updateWindow()
+            }
+        }
         val statusText = when {
             switching -> getString(R.string.capsule_switching)
             state.status == TaskStatus.RUNNING && state.currentAction.isNotBlank() -> state.currentAction
@@ -286,24 +310,26 @@ class FloatingWindowService : Service(), ScopedFloatingWindowController {
             text = statusText
             contentDescription = if (inBackground && state.isExecuting) getString(R.string.capsule_foreground) + ": " + statusText
                 else getString(R.string.capsule_details) + ": " + statusText
-            visibility = if (minimized) View.GONE else View.VISIBLE
+            visibility = View.VISIBLE
         }
         view.findViewById<View>(R.id.status_indicator).apply {
-            visibility = if (minimized) View.GONE else View.VISIBLE
+            visibility = View.VISIBLE
             background = GradientDrawable().apply {
                 shape = GradientDrawable.OVAL
                 setColor(ContextCompat.getColor(this@FloatingWindowService,
                     if (state.status == TaskStatus.FAILED) R.color.capsule_danger else R.color.capsule_accent))
             }
         }
-        view.findViewById<ImageButton>(R.id.btn_minimize).contentDescription = getString(
-            if (minimized) R.string.capsule_ball else R.string.capsule_fold)
-        view.findViewById<ImageButton>(R.id.btn_progress_details).apply {
-            visibility = if (minimized) View.GONE else View.VISIBLE
-            contentDescription = getString(if (detailsExpanded) R.string.capsule_hide_progress else R.string.capsule_show_progress)
-            rotation = if (detailsExpanded) 180f else 0f
+        view.findViewById<ImageButton>(R.id.btn_minimize).apply {
+            visibility = View.VISIBLE
+            contentDescription = getString(if (presentation.bodyVisible) R.string.capsule_fold else R.string.capsule_show_progress)
         }
-        visible(view, R.id.control_buttons_container, !minimized && state.isExecuting)
+        view.findViewById<ImageButton>(R.id.btn_progress_details).apply {
+            visibility = View.VISIBLE
+            contentDescription = getString(if (presentation.bodyVisible) R.string.capsule_fold else R.string.capsule_show_progress)
+            rotation = if (presentation.bodyVisible) 0f else 180f
+        }
+        visible(view, R.id.control_buttons_container, state.isExecuting)
         visible(view, R.id.btn_pause, presentation.pauseVisible)
         visible(view, R.id.btn_resume, presentation.resumeVisible)
         visible(view, R.id.btn_stop, presentation.stopVisible)
@@ -356,6 +382,10 @@ class FloatingWindowService : Service(), ScopedFloatingWindowController {
         view.findViewById<TextView>(R.id.token_usage).text = getString(R.string.overlay_token_usage,
             formatTokenCount(state.totalInputTokens), formatTokenCount(state.totalOutputTokens))
         if (!presentation.bodyVisible) clearInputFocus()
+        windowDiagnostic("render", "presentationBody" to presentation.bodyVisible,
+            "inputVisible" to presentation.inputVisible, "messagesVisible" to presentation.messagesVisible,
+            "keepScreenOn" to presentation.keepScreenOn, "messageCount" to chatAdapter.itemCount,
+            "draftLength" to input.text.length, "switching" to switching)
         scheduleResize()
     }
 
@@ -422,17 +452,30 @@ class FloatingWindowService : Service(), ScopedFloatingWindowController {
 
     private fun setupButtons(view: View) {
         view.findViewById<View>(R.id.btn_open_app).setOnClickListener {
+            windowDiagnostic("control.clicked", "control" to "open_app")
             startActivity(Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP))
         }
         view.findViewById<View>(R.id.btn_minimize).apply {
-            setOnClickListener { FloatingWindowStateManager.setMinimized(!FloatingWindowStateManager.snapshot.value.minimized) }
-            setOnLongClickListener { TaskExecutionManager.cancelTask(); true }
+            setOnClickListener { windowDiagnostic("control.clicked", "control" to "icon"); toggleExpanded() }
+            setOnLongClickListener {
+                windowDiagnostic("control.longClicked", "control" to "icon")
+                TaskExecutionManager.cancelTask(); true
+            }
         }
-        view.findViewById<View>(R.id.btn_close).setOnClickListener { FloatingWindowStateManager.close(this) }
-        view.findViewById<View>(R.id.btn_stop).setOnClickListener { TaskExecutionManager.cancelTask() }
-        view.findViewById<View>(R.id.btn_pause).setOnClickListener { TaskExecutionManager.pauseTask() }
-        view.findViewById<View>(R.id.btn_resume).setOnClickListener { TaskExecutionManager.resumeTask() }
+        view.findViewById<View>(R.id.btn_close).setOnClickListener {
+            windowDiagnostic("control.clicked", "control" to "close"); FloatingWindowStateManager.close(this)
+        }
+        view.findViewById<View>(R.id.btn_stop).setOnClickListener {
+            windowDiagnostic("control.clicked", "control" to "stop"); TaskExecutionManager.cancelTask()
+        }
+        view.findViewById<View>(R.id.btn_pause).setOnClickListener {
+            windowDiagnostic("control.clicked", "control" to "pause"); TaskExecutionManager.pauseTask()
+        }
+        view.findViewById<View>(R.id.btn_resume).setOnClickListener {
+            windowDiagnostic("control.clicked", "control" to "resume"); TaskExecutionManager.resumeTask()
+        }
         view.findViewById<View>(R.id.btn_new_task).setOnClickListener {
+            windowDiagnostic("control.clicked", "control" to "new_task")
             if (!TaskExecutionManager.isTaskRunning()) {
                 TaskExecutionManager.resetTask()
                 drafts.clear(draftConversationId)
@@ -441,23 +484,27 @@ class FloatingWindowService : Service(), ScopedFloatingWindowController {
                 render()
             }
         }
-        view.findViewById<View>(R.id.btn_execution_mode).setOnClickListener { switchMode() }
+        view.findViewById<View>(R.id.btn_execution_mode).setOnClickListener {
+            windowDiagnostic("control.clicked", "control" to "execution_mode"); switchMode()
+        }
         view.findViewById<View>(R.id.btn_progress_details).setOnClickListener {
-            detailsExpanded = !detailsExpanded
-            render()
+            windowDiagnostic("control.clicked", "control" to "expand_arrow"); toggleExpanded()
         }
         view.findViewById<View>(R.id.tv_status).setOnClickListener {
+            windowDiagnostic("control.clicked", "control" to "status")
             if (TaskExecutionManager.executionMode.value == ExecutionMode.BACKGROUND && TaskExecutionManager.isTaskRunning()) {
                 requestMode(ExecutionMode.FOREGROUND)
-            } else { detailsExpanded = !detailsExpanded; render() }
+            } else toggleExpanded()
         }
         view.findViewById<View>(R.id.btn_select_template).setOnClickListener { showTemplateSelection(it) }
         view.findViewById<View>(R.id.btn_start).setOnClickListener {
             val editor = view.findViewById<EditText>(R.id.task_input)
             val text = editor.text.toString().trim()
             if (text.isBlank()) return@setOnClickListener
+            windowDiagnostic("control.clicked", "control" to "send", "textLength" to text.length)
             val accepted = if (TaskExecutionManager.isTaskRunning()) TaskExecutionManager.sendAndResume(text)
                 else TaskExecutionManager.sendMessage(text)
+            windowDiagnostic("control.send.result", "accepted" to accepted)
             if (accepted) {
                 drafts.clear(draftConversationId)
                 editor.text.clear()
@@ -466,6 +513,17 @@ class FloatingWindowService : Service(), ScopedFloatingWindowController {
                 render()
             } else Toast.makeText(this, R.string.capsule_send_failed, Toast.LENGTH_SHORT).show()
         }
+    }
+
+    private fun toggleExpanded() {
+        val view = floatingView ?: return
+        val state = TaskExecutionManager.taskState.value
+        val minimized = FloatingWindowStateManager.snapshot.value.minimized
+        val hasDraft = view.findViewById<EditText>(R.id.task_input).text.isNotBlank()
+        val expanded = CapsulePresentation.from(state.run, minimized, detailsExpanded, hasDraft).bodyVisible
+        detailsExpanded = !expanded
+        FloatingWindowStateManager.setMinimized(expanded)
+        render()
     }
 
     private fun switchMode() = requestMode(if (TaskExecutionManager.executionMode.value == ExecutionMode.BACKGROUND)
@@ -614,12 +672,11 @@ class FloatingWindowService : Service(), ScopedFloatingWindowController {
     /** Animate the existing window; stale animators cannot attach or resurrect a window. */
     private fun resizeToContent(view: View) {
         val params = layoutParams ?: return
-        val minimized = FloatingWindowStateManager.snapshot.value.minimized
-        val width = if (minimized) dp(56) else cardWidth()
+        val width = cardWidth()
         val header = view.findViewById<View>(R.id.header)
         header.measure(View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY),
             View.MeasureSpec.makeMeasureSpec(dp(88), View.MeasureSpec.AT_MOST))
-        val headerHeight = if (minimized) dp(56) else header.measuredHeight.coerceIn(dp(56), dp(88))
+        val headerHeight = header.measuredHeight.coerceIn(dp(56), dp(88))
         if (header.layoutParams.height != headerHeight) {
             header.layoutParams = header.layoutParams.apply { height = headerHeight }
         }
@@ -627,11 +684,15 @@ class FloatingWindowService : Service(), ScopedFloatingWindowController {
         val visibleFrame = Rect().also(view::getWindowVisibleDisplayFrame)
         val maxHeight = minOf((resources.displayMetrics.heightPixels * .76f).toInt(),
             (visibleFrame.bottom - params.y - dp(12)).takeIf { it > dp(100) } ?: resources.displayMetrics.heightPixels)
-        val height = if (minimized || !bodyExpanded) headerHeight else {
+        val height = if (!bodyExpanded) headerHeight else {
             body.measure(View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY),
                 View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED))
             (headerHeight + body.measuredHeight).coerceAtMost(maxHeight.coerceAtLeast(headerHeight + dp(48)))
         }
+        windowDiagnostic("resize.request", "targetWidth" to width, "targetHeight" to height,
+            "headerHeight" to headerHeight, "bodyMeasuredHeight" to body.measuredHeight,
+            "maxHeight" to maxHeight, "visibleFrame" to visibleFrame.toShortString(),
+            "animationRunning" to (sizeAnimator?.isRunning == true))
         if (targetWidth == width && targetHeight == height && (sizeAnimator?.isRunning == true ||
                     (params.width == width && params.height == height))) return
         targetWidth = width
@@ -679,23 +740,56 @@ class FloatingWindowService : Service(), ScopedFloatingWindowController {
     private fun addWindowInternal() {
         val view = floatingView ?: return
         if (isAttached.get()) return
-        try { windowManager?.addView(view, layoutParams); isAttached.set(true) }
-        catch (error: Exception) { Logger.e(TAG, "Could not attach overlay", error) }
+        windowDiagnostic("attach.started")
+        try {
+            windowManager?.addView(view, layoutParams)
+            isAttached.set(true)
+            windowDiagnostic("attach.completed")
+        } catch (error: Exception) {
+            windowDiagnostic("attach.failed", "errorType" to error.javaClass.name)
+            Logger.e(TAG, "Could not attach overlay", error)
+        }
     }
     private fun removeWindowInternal() {
         cancelKeyboardRequest()
         if (!isAttached.get()) return
+        windowDiagnostic("detach.started")
         try { windowManager?.removeView(floatingView) }
-        catch (error: Exception) { Logger.e(TAG, "Could not detach overlay", error) }
-        finally { isAttached.set(false) }
+        catch (error: Exception) {
+            windowDiagnostic("detach.failed", "errorType" to error.javaClass.name)
+            Logger.e(TAG, "Could not detach overlay", error)
+        } finally {
+            isAttached.set(false)
+            windowDiagnostic("detach.completed")
+        }
     }
     private fun updateWindow() {
         if (!isAttached.get()) return
         val params = layoutParams ?: return
         params.x = params.x.coerceIn(0, (resources.displayMetrics.widthPixels - params.width).coerceAtLeast(0))
         try { windowManager?.updateViewLayout(floatingView, params) }
-        catch (error: Exception) { Logger.e(TAG, "Could not resize overlay", error) }
+        catch (error: Exception) {
+            windowDiagnostic("resize.failed", "errorType" to error.javaClass.name)
+            Logger.e(TAG, "Could not resize overlay", error)
+        }
     }
+
+    private fun windowDiagnostic(operation: String, vararg fields: Pair<String, Any?>) {
+        val params = layoutParams
+        val state = TaskExecutionManager.taskState.value
+        com.kevinluo.autoglm.util.DiagnosticLog.event("Window", operation, *fields,
+            "runId" to state.runId, "phase" to state.status, "step" to state.stepNumber,
+            "attached" to isAttached.get(), "viewPresent" to (floatingView != null),
+            "viewAttached" to (floatingView?.isAttachedToWindow == true),
+            "policyVisible" to FloatingWindowStateManager.shouldBeVisible(),
+            "minimized" to FloatingWindowStateManager.snapshot.value.minimized,
+            "detailsExpanded" to detailsExpanded, "bodyExpanded" to bodyExpanded,
+            "width" to params?.width, "height" to params?.height, "x" to params?.x, "y" to params?.y,
+            "flags" to params?.flags?.let(Integer::toHexString),
+            "keyboardGeneration" to keyboardRequestGeneration,
+            "bodyFadeGeneration" to bodyFadeGeneration)
+    }
+
     private fun cardWidth() = minOf(resources.displayMetrics.widthPixels - dp(24), dp(400)).coerceAtLeast(dp(200))
     private fun dp(value: Int) = (value * resources.displayMetrics.density).roundToInt()
     private fun visible(view: View, id: Int, visible: Boolean) {

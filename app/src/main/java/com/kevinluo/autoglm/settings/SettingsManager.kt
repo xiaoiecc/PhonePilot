@@ -116,6 +116,8 @@ class SettingsManager private constructor(private val context: Context) {
         private const val KEY_VOICE_WAKE_WORDS = "voice_wake_words"
         private const val KEY_VOICE_WAKE_SENSITIVITY = "voice_wake_sensitivity"
 
+        private const val KEY_DETAILED_DIAGNOSTICS = "detailed_diagnostics_enabled"
+
         // Default values
         private val DEFAULT_MODEL_CONFIG = ModelConfig()
         private val DEFAULT_AGENT_CONFIG = AgentConfig()
@@ -765,5 +767,11 @@ class SettingsManager private constructor(private val context: Context) {
      */
     fun setWakeWordSensitivity(sensitivity: Float) {
         prefs.edit().putFloat(KEY_VOICE_WAKE_SENSITIVITY, sensitivity.coerceIn(0f, 1f)).apply()
+    }
+
+    fun isDetailedDiagnosticsEnabled(): Boolean = prefs.getBoolean(KEY_DETAILED_DIAGNOSTICS, false)
+
+    fun setDetailedDiagnosticsEnabled(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_DETAILED_DIAGNOSTICS, enabled).apply()
     }
 }

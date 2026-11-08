@@ -34,7 +34,6 @@ class AndroidComputerDriver(
         withOverlayHidden(window, checkpoint) {
             when (action) {
                 is PreparedAction.Tap -> checkResult(when {
-                    action.longPress -> deviceExecutor.longPress(action.point.x, action.point.y, 650)
                     action.doubleTap -> deviceExecutor.doubleTap(action.point.x, action.point.y)
                     else -> deviceExecutor.tap(action.point.x, action.point.y)
                 })

@@ -33,6 +33,10 @@ class TextInputManager internal constructor(
     suspend fun editText(request: TextEditRequest): InputResult = input(request.text, replace = true, request = request)
 
     private suspend fun input(text: String, replace: Boolean, request: TextEditRequest? = null): InputResult = operation.withLock {
+        com.kevinluo.autoglm.util.DiagnosticLog.event("Input", "transaction.started",
+            "textLength" to text.length, "replace" to replace,
+            "hasEditRequest" to (request != null), "readinessTimeoutMs" to readinessTimeoutMs,
+            "expectedTarget" to expectedTarget())
         withContext(ioDispatcher) {
             if (text.length > 20000) return@withContext InputResult.failure("输入文字过长")
             var originalIme: String? = null
@@ -61,10 +65,17 @@ class TextInputManager internal constructor(
                     if (result == null) {
                         val editor = gateway.awaitEditor(readinessTimeoutMs, previousEditor, request?.staleEditorGeneration)
                         val target = expectedTarget()
-                        val targetVerified = target == null || (editor?.packageName == target.second && target.first > 0 &&
+                        val focusedDisplay = if (target != null && editor?.packageName == target.second && target.first > 0) {
                             command(listOf("dumpsys", "input_method"), COMMAND_TIMEOUT_MS).let {
-                                it.succeeded && ImeTargetIdentity.focusedDisplay(it.stdout) == target.first
-                            })
+                                if (it.succeeded) ImeTargetIdentity.focusedDisplay(it.stdout) else null
+                            }
+                        } else null
+                        val targetVerified = target == null || (editor?.packageName == target.second && target.first > 0 &&
+                            focusedDisplay == target.first)
+                        com.kevinluo.autoglm.util.DiagnosticLog.event("Input", "target.checked",
+                            "expectedDisplay" to target?.first, "expectedPackage" to target?.second,
+                            "editorGeneration" to editor?.generation, "editorPackage" to editor?.packageName,
+                            "focusedDisplay" to focusedDisplay, "verified" to targetVerified)
                         result = if (editor == null) InputResult.failure("键盘未连接到输入框，未发送文字")
                             else if (!targetVerified) InputResult.failure("无法确认键盘连接到后台目标应用，未发送文字；可切到前台继续")
                             else gateway.input(editor, text, replace) { stage ->
@@ -90,6 +101,11 @@ class TextInputManager internal constructor(
                 }
             }
             val outcome = result ?: InputResult.failure("输入请求未完成")
+            com.kevinluo.autoglm.util.DiagnosticLog.event("Input", "transaction.completed",
+                "disposition" to outcome.disposition, "messageLength" to outcome.message.length,
+                "restored" to restored, "originalIme" to originalIme,
+                "previousEditorGeneration" to previousEditor?.generation,
+                "previousEditorPackage" to previousEditor?.packageName)
             if (restored) outcome else outcome.copy(
                 restorationSucceeded = false,
                 message = outcome.message + "；原输入法恢复失败，请手动检查键盘",
