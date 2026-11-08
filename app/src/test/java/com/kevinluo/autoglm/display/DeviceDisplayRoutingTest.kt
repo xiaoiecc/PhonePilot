@@ -37,14 +37,18 @@ class DeviceDisplayRoutingTest {
         verify(exactly = 1) { service.inputDisplay(any(), any(), any(), any()) }
         verify(exactly = 0) { service.executeArgs(any(), any(), any()) }
     }
-    @Test fun `old receipt cannot replace newer display route`() = runBlocking<Unit> {
+    @Test fun `successful launch refreshes the actual target before later text input`() = runBlocking<Unit> {
         val service = mockk<IUserService>()
         every { service.attachDisplay("run-a") } returns receipt()
-        every { service.switchDisplay("run-a", 7, false) } returns receipt(8, false)
-        every { service.inspectDisplay("run-a", 7) } returns receipt(7, true)
+        every { service.launchOnDisplay("run-a", 7, "com.target/.MainActivity") } returns
+            CommandResultParcel(0, "", "", false, false)
+        every { service.inspectDisplay("run-a", 7) } returns DisplayResultParcel(true, "", "run-a", 7, 19, 99, "com.target", 720, 1480, 320, true)
         val displays = DisplaySessionClient(service)
-        displays.attach("run-a"); displays.switchMode("run-a", 7, false); displays.refresh("run-a", 7)
-        assertEquals(8L, displays.state.generation)
-        assertFalse(displays.state.background)
+        displays.attach("run-a")
+        assertTrue(displays.launch("com.target/.MainActivity").succeeded)
+        assertEquals("com.target", displays.state.packageName)
+        assertEquals(99, displays.state.taskId)
+        verify(exactly = 1) { service.launchOnDisplay("run-a", 7, "com.target/.MainActivity") }
+        verify(exactly = 1) { service.inspectDisplay("run-a", 7) }
     }
 }

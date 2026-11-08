@@ -1,11 +1,22 @@
 package com.kevinluo.autoglm.input
 
-/** IME surface placement is not the editor's display. Unknown/vendor formats fail closed. */
+/** Known focused-client layouts; unknown or multi-user ambiguity remains unusable. */
 internal object ImeTargetIdentity {
-    fun focusedDisplay(dump: String): Int? {
-        val focused = dump.lineSequence().filter { it.trimStart().startsWith("mCurFocusedWindow=") }.toList()
-        if (focused.size != 1) return null
-        return Regex("client=ClientState\\{[^}]*\\bdisplayId=(\\d+)\\}").find(focused.single())
-            ?.groupValues?.get(1)?.toIntOrNull()
+    private enum class Layout(val marker: String) {
+        LEGACY_FOCUSED_WINDOW("mCurFocusedWindow="),
+        BINDING_STATE_CLIENT("mFocusedWindowClient="),
     }
+
+    fun focusedDisplay(dump: String): Int? {
+        val matches = dump.lineSequence().flatMap { line ->
+            val trimmed = line.trimStart()
+            Layout.entries.filter { trimmed.startsWith(it.marker) }.map { it to trimmed }
+        }.mapNotNull { (layout, line) -> displayId(line)?.let { layout to it } }.toList()
+        if (matches.size != matches.distinct().size) return null
+        return matches.map { it.second }.distinct().singleOrNull()
+    }
+
+    private fun displayId(line: String): Int? = Regex(
+        "(?:\\bdisplayId|\\bmSelfReportedDisplayId)=(\\d+)",
+    ).find(line)?.groupValues?.get(1)?.toIntOrNull()
 }

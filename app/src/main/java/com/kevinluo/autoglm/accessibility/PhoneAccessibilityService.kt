@@ -78,10 +78,14 @@ class PhoneAccessibilityService : AccessibilityService() {
         lastObservation = null
     }
 
-    suspend fun invalidateObservation() = withContext(Dispatchers.Main.immediate) {
+    fun invalidateObservationForConnection() {
         lease.invalidate()
         targets.clear()
         lastObservation = null
+    }
+
+    suspend fun invalidateObservation() = withContext(Dispatchers.Main.immediate) {
+        invalidateObservationForConnection()
     }
 
     suspend fun execute(
