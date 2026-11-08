@@ -12,8 +12,9 @@ import org.junit.jupiter.api.Test
 class UiOverlayScopeTest {
     private class Window : FloatingWindowController {
         var attached = true
+        var onHide: (() -> Unit)? = null
         override fun isVisible() = attached
-        override fun hide() { attached = false }
+        override fun hide() { attached = false; onHide?.invoke() }
         override fun show() { attached = true }
         override fun showAndBringToFront() = show()
     }
@@ -35,16 +36,18 @@ class UiOverlayScopeTest {
         assertTrue(window.attached)
     }
 
-    @Test fun `read only accessibility observation does not hide the overlay`() = runTest {
+    @Test fun `placement request during overlay hide does not deadlock the admitted UI primitive`() = runTest {
         val service = mockk<PhoneAccessibilityService>()
         val window = Window()
-        coEvery { service.execute(any(), any()) } answers {
-            assertEquals(true, window.attached)
-            "ok"
-        }
+        coEvery { service.execute(any(), any()) } returns "ok"
         val harness = RunnerHarness(this, service = service, window = window)
+        window.onHide = {
+            harness.coordinator.requestExecutionMode(harness.coordinator.snapshot.value.runId!!,
+                com.kevinluo.autoglm.core.ExecutionMode.BACKGROUND)
+        }
         harness.respond(
-            functionResponse("r1", function("observe", "android_ui", """{"operation":"observe"}""")),
+            functionResponse("r1", function("click", "android_ui",
+                """{"operation":"click","snapshot_id":"s","node_id":"n"}""")),
             finalResponse(),
         )
         harness.run()

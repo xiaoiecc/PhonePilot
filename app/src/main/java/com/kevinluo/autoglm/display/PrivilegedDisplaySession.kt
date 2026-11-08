@@ -95,18 +95,36 @@ internal class PrivilegedDisplaySession(private val execute: (Array<String>, Lon
         background = false; run = ""; generation = ++nextGeneration; task = null
     }
 
-    @Synchronized fun capture(runId: String, expected: Long, imageId: String): DisplayResultParcel {
+    fun capture(runId: String, expected: Long, imageId: String): DisplayResultParcel {
         var path = ""
         return receipt {
-            requireLease(runId, expected); inspectOwned()
-            check(background) { "当前不是后台显示屏" }
-            path = DisplayInputPolicy.screenshotPath(imageId)
             val deadline = SystemClock.elapsedRealtime() + 3500
-            synchronized(frameLock) {
+            synchronized(this) {
+                requireLease(runId, expected)
+                inspectOwned()
+                check(background) { "当前不是后台显示屏" }
+                path = DisplayInputPolicy.screenshotPath(imageId)
+            }
+            val image = synchronized(frameLock) {
                 while (frame == null && SystemClock.elapsedRealtime() < deadline) frameLock.wait(100)
-                val image = checkNotNull(frame) { "后台画面尚未绘制，请重新观察" }
-                // Static windows do not continuously repaint. Age alone does not invalidate their last frame.
-                FileOutputStream(path).use { check(image.compress(Bitmap.CompressFormat.PNG, 100, it)) }
+                checkNotNull(frame) { "后台画面尚未绘制，请重新观察" }.copy(Bitmap.Config.ARGB_8888, false)
+            }
+            checkNotNull(image) { "无法复制后台画面" }
+            try {
+                synchronized(this) {
+                    requireLease(runId, expected)
+                    inspectOwned()
+                }
+                val write = FutureTask {
+                    FileOutputStream(path).use { check(image.compress(Bitmap.CompressFormat.PNG, 100, it)) }
+                }
+                Thread(write, "PhonePilot-screenshot-writer").apply { isDaemon = true }.start()
+                val remaining = deadline - SystemClock.elapsedRealtime()
+                if (remaining <= 0) error("后台截图编码或写入超时")
+                try { write.get(remaining, TimeUnit.MILLISECONDS) }
+                catch (_: java.util.concurrent.TimeoutException) { error("后台截图编码或写入超时") }
+            } finally {
+                image.recycle()
             }
         }.let { r -> if (!r.success) r else DisplayResultParcel(r.success, r.message, r.runId, r.generation,
             r.displayId, r.taskId, r.packageName, r.width, r.height, r.density, r.background, path) }

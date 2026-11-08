@@ -56,16 +56,17 @@ class ComponentManager private constructor(private val context: Context) {
         if (userService?.asBinder() == service.asBinder() && phoneAgentInternal != null) return
         if (userService != null) cleanupServiceDependentComponents()
         userService = service
-        deviceExecutorInternal = DeviceExecutor(service)
+        val device = DeviceExecutor(service)
+        deviceExecutorInternal = device
         textInputManagerInternal = TextInputManager(service, expectedTarget = {
-            deviceExecutorInternal?.displays?.state?.takeIf { it.background }?.let { it.displayId to it.packageName }
+            device.displays.state.takeIf { it.background }?.let { it.displayId to it.packageName }
         })
         screenshotServiceInternal = ScreenshotService(service, backgroundCapture = { imageId ->
-            val displays = checkNotNull(deviceExecutorInternal).displays
+            val displays = device.displays
             val target = displays.state
             if (!target.background) null else displays.captureBlocking(target.runId, target.generation, imageId)
         }, floatingWindowControllerProvider = {
-            if (deviceExecutorInternal?.displays?.state?.background == true) null else FloatingWindowService.getInstance()
+            if (device.displays.state.background) null else FloatingWindowService.getInstance()
         })
         createRunner()
     }
@@ -77,6 +78,11 @@ class ComponentManager private constructor(private val context: Context) {
 
     private fun cleanupServiceDependentComponents() {
         TaskExecutionManager.onRunnerUnavailable()
+        PhoneAccessibilityService.instance?.let { service ->
+            android.os.Handler(context.mainLooper).post {
+                service.invalidateObservationForConnection()
+            }
+        }
         phoneAgentInternal = null
         screenshotServiceInternal = null
         textInputManagerInternal = null

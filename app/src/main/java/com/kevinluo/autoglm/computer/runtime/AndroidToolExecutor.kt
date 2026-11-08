@@ -273,7 +273,7 @@ internal class AndroidToolExecutor(
                                     if (!readOnly) { frame = null; changed = true }
                                     control.deviceOperation(batchGeneration) {
                                         if (readOnly) service.execute(command.command, textEditor)
-                                        else withOverlayHidden(window(), checkpoint = control::checkpoint) {
+                                        else withOverlayHidden(window()) {
                                             service.execute(command.command, textEditor)
                                         }
                                     }

@@ -52,10 +52,20 @@ class DisplaySessionClient(private val service: IUserService) {
         val target = state
         com.kevinluo.autoglm.util.DiagnosticLog.event("Display", "launch.started",
             "runId" to target.runId, "generation" to target.generation, "component" to component)
-        service.launchOnDisplay(target.runId, target.generation, component).toResult().also { result ->
-            com.kevinluo.autoglm.util.DiagnosticLog.event("Display", "launch.completed",
-                "exitCode" to result.exitCode, "timedOut" to result.timedOut)
+        val launched = service.launchOnDisplay(target.runId, target.generation, component).toResult()
+        if (!launched.succeeded) return@withContext launched
+        val refreshed = call("launch.refresh", target.runId, target.generation) {
+            service.inspectDisplay(target.runId, target.generation)
         }
+        if (!refreshed.success || refreshed.packageName != component.substringBefore('/') ||
+            refreshed.background != target.background) {
+            return@withContext CommandResult(null, stderr = "启动已受理，但实际目标尚未确认；请重新观察，不要重复启动")
+        }
+        com.kevinluo.autoglm.util.DiagnosticLog.event("Display", "launch.completed",
+            "exitCode" to launched.exitCode, "timedOut" to launched.timedOut,
+            "packageName" to refreshed.packageName, "taskId" to refreshed.taskId,
+            "generation" to refreshed.generation)
+        launched
     }
     private suspend fun call(
         operation: String, runId: String, generation: Long, background: Boolean? = null,
@@ -63,18 +73,20 @@ class DisplaySessionClient(private val service: IUserService) {
     ): DisplaySessionState = com.kevinluo.autoglm.util.DiagnosticLog.traceSuspend("Display", operation,
         "runId" to runId, "generation" to generation, "requestedBackground" to background,
         "stateBefore" to state) {
-        withContext(Dispatchers.IO) {
-            val result = block()
-            DisplaySessionState(result.runId, result.generation, result.displayId, result.taskId, result.packageName,
-                result.width, result.height, result.density, result.background, result.success, result.message).also {
-                    if (it.generation >= state.generation) state = it
-                    com.kevinluo.autoglm.util.DiagnosticLog.event("Display", "state",
-                        "operation" to operation, "runId" to it.runId, "generation" to it.generation,
-                        "displayId" to it.displayId, "taskId" to it.taskId, "packageName" to it.packageName,
-                        "width" to it.width, "height" to it.height, "density" to it.density,
-                        "background" to it.background, "success" to it.success,
-                        "messageLength" to it.message.length)
-                }
+        kotlinx.coroutines.withTimeout(5000) {
+            withContext(Dispatchers.IO) {
+                val result = block()
+                DisplaySessionState(result.runId, result.generation, result.displayId, result.taskId, result.packageName,
+                    result.width, result.height, result.density, result.background, result.success, result.message).also {
+                        if (it.generation >= state.generation) state = it
+                        com.kevinluo.autoglm.util.DiagnosticLog.event("Display", "state",
+                            "operation" to operation, "runId" to it.runId, "generation" to it.generation,
+                            "displayId" to it.displayId, "taskId" to it.taskId, "packageName" to it.packageName,
+                            "width" to it.width, "height" to it.height, "density" to it.density,
+                            "background" to it.background, "success" to it.success,
+                            "messageLength" to it.message.length)
+                    }
+            }
         }
     }
     companion object { const val TAP = 1; const val SWIPE = 2; const val KEY = 3 }
