@@ -4,6 +4,12 @@ import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.Test
 
 class HistoryTimelineTest {
+    @Test fun `message attachments remain ordered and export as attachments rather than phone screenshots`() {
+        val images = listOf("first.webp", "second.webp").map { com.kevinluo.autoglm.core.ChatImage(it, "image/webp") }
+        val entry = HistoryTimeline.Entry.Message(HistoryMessage(HistoryMessageRole.USER, "compare", images = images), "run")
+        assertEquals(images.map { it.path }, HistoryTimeline.images(entry).map { it.path })
+        assertTrue(HistoryTimeline.images(entry).all { it.kind == HistoryTimeline.ImageKind.ATTACHMENT })
+    }
     private fun call(run: String = "run", step: Int = 1, time: Long = 20, status: HistoryToolStatus = HistoryToolStatus.SUCCEEDED) =
         HistoryToolCall("call-$run-$step", run, step, "android_ui", "{\"operation\":\"click\",\"node_id\":\"n3\"}", time, time + 75,
             status, "Focused the selected field", beforeScreenshotPath = "before.webp", afterScreenshotPath = "after.webp",

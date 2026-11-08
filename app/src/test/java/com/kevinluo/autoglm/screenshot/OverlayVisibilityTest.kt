@@ -24,7 +24,8 @@ class OverlayVisibilityTest {
         var pauseRequested = false
         lateinit var coordinator: RunCoordinator
         val runner = object : AgentRunner {
-            override suspend fun run(task: String, continueConversation: Boolean, control: RunControl): RunOutcome {
+            override suspend fun run(input: ChatInput, continueConversation: Boolean, control: RunControl): RunOutcome {
+                control.emit(RunProgress.DeviceToolsRequested)
                 withOverlayHidden(window, hideDelayMs = 0, uiDispatcher = Dispatchers.Unconfined) {
                     withOverlayHidden(window, checkpoint = {
                         if (!pauseRequested) { pauseRequested = true; coordinator.pauseUser() }
@@ -36,7 +37,7 @@ class OverlayVisibilityTest {
                 }
                 return RunOutcome(true, "done", 1)
             }
-            override fun enqueueMessage(text: String) = false
+            override fun enqueueMessage(input: ChatInput) = false
             override fun restoreConversation(session: ConversationSnapshot, messages: List<ChatMessage>) = true
             override fun snapshot() = ConversationSnapshot("chat")
             override fun canContinue() = false
@@ -58,7 +59,8 @@ class OverlayVisibilityTest {
     }
     private class PolicyWindow(active: Boolean = true) : ScopedFloatingWindowController {
         val policy = com.kevinluo.autoglm.core.OverlayPolicy().apply {
-            if (active) onRunChanged(com.kevinluo.autoglm.core.RunSnapshot(runId = "run", phase = com.kevinluo.autoglm.core.RunPhase.RUNNING))
+            if (active) onRunChanged(com.kevinluo.autoglm.core.RunSnapshot(runId = "run",
+                phase = com.kevinluo.autoglm.core.RunPhase.RUNNING, deviceToolsRequested = true))
         }
         var directMutations = 0
         override fun acquireHidden(): AutoCloseable = policy.acquireHide()

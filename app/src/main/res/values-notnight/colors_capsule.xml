@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="capsule_surface">#FFF5F7FC</color>
+    <color name="capsule_field">#FFE9EDF5</color>
+    <color name="capsule_outline">#FFD6DDE9</color>
+    <color name="capsule_ink">#FF242C3B</color>
+    <color name="capsule_muted">#FF596579</color>
+    <color name="capsule_accent">#FF385E9F</color>
+    <color name="capsule_accent_soft">#FFDEE8FA</color>
+    <color name="capsule_on_accent">#FFFFFFFF</color>
+    <color name="capsule_danger">#FFA83F44</color>
+    <color name="capsule_danger_soft">#FFF7E2E3</color>
+</resources>

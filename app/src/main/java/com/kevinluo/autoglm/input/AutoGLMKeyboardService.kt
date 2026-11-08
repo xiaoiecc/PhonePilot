@@ -286,7 +286,7 @@ class AutoGLMKeyboardService : InputMethodService() {
         releaseEditor()
         if (connection != null) {
             publishedConnection = connection
-            editorToken = KeyboardInputGateway.gateway.activate(this, InputConnectionEditor(connection))
+            editorToken = KeyboardInputGateway.gateway.activate(this, InputConnectionEditor(connection), currentInputEditorInfo?.packageName)
         }
     }
 

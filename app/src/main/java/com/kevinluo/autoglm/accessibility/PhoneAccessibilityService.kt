@@ -33,7 +33,7 @@ class PhoneAccessibilityService : AccessibilityService() {
         private const val TRAVERSAL_NOTICE = "[Traversal budget reached; find and scoped observe search captured nodes only. Scroll or use a screenshot for remaining content.]\n"
     }
 
-    private data class Target(val path: List<Int>, val fingerprint: String, val windowId: Int)
+    private data class Target(val path: List<Int>, val fingerprint: String, val windowId: Int, val displayId: Int)
     private data class CapturedObservation(
         val snapshot: UiSnapshot,
         val targets: Map<String, Target> = emptyMap(),
@@ -43,6 +43,7 @@ class PhoneAccessibilityService : AccessibilityService() {
     private val lease = SnapshotLease()
     private var lastObservation: CapturedObservation? = null
     private val lastSnapshot: UiSnapshot? get() = lastObservation?.snapshot
+    private var selectedDisplayId = 0
 
     override fun onServiceConnected() {
         instance = this
@@ -66,6 +67,16 @@ class PhoneAccessibilityService : AccessibilityService() {
     }
 
     suspend fun observe(): UiSnapshot = withContext(Dispatchers.Main.immediate) { observeNow() }
+
+    /** The composition root selects a verified display lease, never a model-supplied display ID. */
+    suspend fun selectDisplay(displayId: Int) = withContext(Dispatchers.Main.immediate) {
+        require(displayId >= 0)
+        selectedDisplayId = displayId
+        // Even a recycled numeric display ID must not renew an old observation's authority.
+        lease.invalidate()
+        targets.clear()
+        lastObservation = null
+    }
 
     suspend fun invalidateObservation() = withContext(Dispatchers.Main.immediate) {
         lease.invalidate()
@@ -119,6 +130,10 @@ class PhoneAccessibilityService : AccessibilityService() {
                 NodeAction.Simple.LONG_CLICK -> AccessibilityNodeInfo.ACTION_LONG_CLICK
                 NodeAction.Simple.SCROLL_FORWARD -> AccessibilityNodeInfo.ACTION_SCROLL_FORWARD
                 NodeAction.Simple.SCROLL_BACKWARD -> AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD
+                NodeAction.Simple.SCROLL_UP -> android.R.id.accessibilityActionScrollUp
+                NodeAction.Simple.SCROLL_DOWN -> android.R.id.accessibilityActionScrollDown
+                NodeAction.Simple.SCROLL_LEFT -> android.R.id.accessibilityActionScrollLeft
+                NodeAction.Simple.SCROLL_RIGHT -> android.R.id.accessibilityActionScrollRight
                 NodeAction.Simple.SHOW -> AccessibilityNodeInfo.AccessibilityAction.ACTION_SHOW_ON_SCREEN.id
                 is NodeAction.Selection -> AccessibilityNodeInfo.ACTION_SET_SELECTION
                 is NodeAction.Progress -> AccessibilityNodeInfo.AccessibilityAction.ACTION_SET_PROGRESS.id
@@ -215,9 +230,9 @@ class PhoneAccessibilityService : AccessibilityService() {
         val result = textEditor(TextEditRequest(updated, guard = { stage ->
             // Focus/IME changes legitimately reflow bounds and invalidate the observation.
             // Re-check the exact live node and input focus instead of reusing that old lease.
-            val focused = findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+            val focused = inputFocusForSelectedDisplay()
             try {
-                current.refresh() && current == focused && current.isFocused &&
+                selectedDisplayId == target.displayId && current.refresh() && current == focused && current.isFocused &&
                     current.windowId == target.windowId && current.isEditable &&
                     current.isVisibleToUser && current.isEnabled && !isSensitive(current) &&
                     (stage == TextEditStage.BEFORE_COMMIT || current.text?.toString().orEmpty() == original)
@@ -267,7 +282,7 @@ class PhoneAccessibilityService : AccessibilityService() {
             val matches = SemanticFinder.find(snapshot, query, scope)
             if (matches.isNotEmpty()) return SemanticFinder.formatMatches(snapshot, matches)
             val scrollers = snapshot.nodes.filter { node ->
-                node.actions.any { it.id == "scroll_forward" } && SemanticFinder.inScope(node, snapshot, scope)
+                node.actions.any { it.id in setOf("scroll_forward", "scroll_down") } && SemanticFinder.inScope(node, snapshot, scope)
             }
             if (searchScroll && scrollers.size > 1 && scope == null) {
                 return "ERROR: multiple scroll containers; provide scope_id or use a screenshot."
@@ -277,7 +292,9 @@ class PhoneAccessibilityService : AccessibilityService() {
                 return SemanticFinder.formatMatches(snapshot, matches) +
                     "No match after searching $screens screen(s); do not assume it is absent from the app.\n"
             }
-            val scrollResult = execute(UiCommand.Target(snapshot.id, scroller.id, NodeAction.Simple.SCROLL_FORWARD))
+            val scrollAction = if (scroller.actions.any { it.id == "scroll_forward" }) NodeAction.Simple.SCROLL_FORWARD
+                else NodeAction.Simple.SCROLL_DOWN
+            val scrollResult = execute(UiCommand.Target(snapshot.id, scroller.id, scrollAction))
             if (scrollResult.startsWith("ERROR:")) return scrollResult
             val next = lastSnapshot ?: observeNow()
             val diff = SnapshotDiffer.diff(snapshot, next)
@@ -366,7 +383,7 @@ class PhoneAccessibilityService : AccessibilityService() {
         val observedTargets = mutableMapOf<String, Target>()
         val root = try { selectObservationRoot() } catch (_: Exception) { null }
         if (root == null) {
-            return CapturedObservation(UiSnapshot(id, "Accessibility tree unavailable. Use android_screenshot or ask the user to open the target app."))
+            return CapturedObservation(UiSnapshot(id, "Accessibility tree unavailable on the selected display. Use android_screenshot for this display or request user takeover; no other display was read."))
         }
         val nodes = mutableListOf<SemanticNode>()
         var visited = 0
@@ -418,7 +435,7 @@ class PhoneAccessibilityService : AccessibilityService() {
                     bounds = intArrayOf(bounds.left, bounds.top, bounds.right, bounds.bottom),
                     sensitive = protected,
                 )
-                if (!protected) observedTargets[nodeId] = Target(path, fingerprint(node), node.windowId)
+                if (!protected) observedTargets[nodeId] = Target(path, fingerprint(node), node.windowId, selectedDisplayId)
                 emittedId = nodeId
                 emittedDepth = depth + 1
             }
@@ -456,9 +473,10 @@ class PhoneAccessibilityService : AccessibilityService() {
     }
 
     private fun selectObservationRoot(): AccessibilityNodeInfo? {
+        val displayWindows = windowsForDisplay(selectedDisplayId)
         // Our full-screen Activity is not a transparent floating control. Do not act on
         // another application's still-listed background window while it is in front.
-        windows.firstOrNull { window ->
+        displayWindows.firstOrNull { window ->
             if (window.type != AccessibilityWindowInfo.TYPE_APPLICATION || !window.isActive) false
             else {
                 val root = window.root
@@ -466,7 +484,7 @@ class PhoneAccessibilityService : AccessibilityService() {
                 finally { root?.let(::recycle) }
             }
         }?.let { return it.root }
-        val candidates = windows.filter { window ->
+        val candidates = displayWindows.filter { window ->
             runCatching {
                 val root = window.root
                 try { root != null && root.packageName?.toString() != packageName }
@@ -477,11 +495,32 @@ class PhoneAccessibilityService : AccessibilityService() {
             ?: candidates.firstOrNull { it.isActive }
             ?: candidates.firstOrNull { it.isFocused }
             ?: candidates.firstOrNull()
-        return selected?.root ?: rootInActiveWindow
+        return selected?.root ?: if (selectedDisplayId == 0) rootInActiveWindow else null
     }
 
-    private fun rootForWindow(windowId: Int): AccessibilityNodeInfo? =
-        windows.firstOrNull { it.id == windowId }?.root ?: rootInActiveWindow?.takeIf { it.windowId == windowId }
+    /** Non-primary displays never borrow the active-window convenience API (which targets display 0). */
+    internal fun windowsForDisplay(displayId: Int): List<AccessibilityWindowInfo> = when {
+        displayId == 0 -> windows
+        Build.VERSION.SDK_INT >= 30 -> windowsOnAllDisplays?.get(displayId).orEmpty()
+        else -> emptyList()
+    }
+
+    private fun rootForWindow(windowId: Int): AccessibilityNodeInfo? {
+        windowsForDisplay(selectedDisplayId).firstOrNull { it.id == windowId }?.root?.let { return it }
+        if (selectedDisplayId != 0) return null
+        val fallback = rootInActiveWindow ?: return null
+        if (fallback.windowId == windowId) return fallback
+        recycle(fallback)
+        return null
+    }
+
+    private fun inputFocusForSelectedDisplay(): AccessibilityNodeInfo? {
+        val root = selectObservationRoot() ?: return null
+        val focused = try { root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT) }
+        catch (_: Exception) { null }
+        if (root !== focused) recycle(root)
+        return focused
+    }
 
     private fun semanticKind(node: AccessibilityNodeInfo): SemanticKind = when {
         node.isEditable -> SemanticKind.INPUT
@@ -500,6 +539,10 @@ class PhoneAccessibilityService : AccessibilityService() {
             AccessibilityNodeInfo.ACTION_SET_TEXT -> "set_text"
             AccessibilityNodeInfo.ACTION_SCROLL_FORWARD -> "scroll_forward"
             AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD -> "scroll_backward"
+            android.R.id.accessibilityActionScrollUp -> "scroll_up"
+            android.R.id.accessibilityActionScrollDown -> "scroll_down"
+            android.R.id.accessibilityActionScrollLeft -> "scroll_left"
+            android.R.id.accessibilityActionScrollRight -> "scroll_right"
             AccessibilityNodeInfo.AccessibilityAction.ACTION_SHOW_ON_SCREEN.id -> "show"
             AccessibilityNodeInfo.ACTION_SET_SELECTION -> "set_selection"
             AccessibilityNodeInfo.AccessibilityAction.ACTION_SET_PROGRESS.id -> "set_progress"

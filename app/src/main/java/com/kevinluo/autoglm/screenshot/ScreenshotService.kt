@@ -2,7 +2,6 @@ package com.kevinluo.autoglm.screenshot
 
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
-import android.os.Build
 import android.util.Base64
 import com.kevinluo.autoglm.IUserService
 import com.kevinluo.autoglm.device.DeviceCommandClient
@@ -13,7 +12,6 @@ import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
-import java.io.ByteArrayOutputStream
 
 /**
  * Data class representing a captured screenshot.
@@ -36,6 +34,7 @@ data class Screenshot(
     val originalWidth: Int = width,
     val originalHeight: Int = height,
     val isSensitive: Boolean = false,
+    val placementGeneration: Long = 0,
 )
 
 /**
@@ -82,6 +81,7 @@ interface FloatingWindowController {
  */
 class ScreenshotService(
     userService: IUserService,
+    private val backgroundCapture: ((String) -> String?)? = null,
     private val floatingWindowControllerProvider: () -> FloatingWindowController? = { null },
 ) {
     private val commandClient = DeviceCommandClient(userService)
@@ -91,20 +91,6 @@ class ScreenshotService(
         private const val SHOW_DELAY_MS = 100L
         private const val FALLBACK_WIDTH = 1080
         private const val FALLBACK_HEIGHT = 1920
-
-        // Lossless screenshots preserve small UI text after the existing resolution limit.
-        private const val WEBP_QUALITY = 50
-
-        /**
-         * Old Android versions use PNG rather than silently falling back to lossy WebP.
-         */
-        val WEBP_FORMAT: Bitmap.CompressFormat
-            get() =
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                    Bitmap.CompressFormat.WEBP_LOSSLESS
-                } else {
-                    Bitmap.CompressFormat.PNG
-                }
 
         // Screenshot scaling settings - use max dimensions instead of fixed scale factor
         // This ensures consistent output size regardless of device resolution
@@ -187,14 +173,12 @@ class ScreenshotService(
                     bitmap = scaledBitmap
                     Logger.d(TAG, "Scaled from ${originalWidth}x$originalHeight to ${scaledWidth}x$scaledHeight")
                 }
-                ScreenshotCompression.encode(bitmap, pngData.takeIf {
-                    scaledWidth == originalWidth && scaledHeight == originalHeight
-                })
+                ScreenshotCompression.encode(bitmap)
             } finally {
                 bitmap.recycle()
             }
             val compressionRatio = 100L * imageData.size / pngData.size
-            Logger.d(TAG, "Lossless ${ScreenshotCompression.extensionFor(imageData)}: ${imageData.size} bytes ($compressionRatio% of captured PNG)")
+            Logger.d(TAG, "WebP: ${imageData.size} bytes ($compressionRatio% of captured PNG)")
 
             val base64Data = encodeToBase64(imageData)
             Logger.d(TAG, "Screenshot captured: ${scaledWidth}x$scaledHeight, base64 length: ${base64Data.length}")
@@ -274,7 +258,10 @@ class ScreenshotService(
                 floatingWindowControllerProvider(), hideDelayMs = HIDE_DELAY_MS,
                 showDelayMs = SHOW_DELAY_MS, bringToFront = true,
             ) {
-                val script = "set -e\nscreencap -p $pngFile\nbase64 $pngFile > $base64File\nstat -c %s $base64File"
+                val capturedPath = backgroundCapture?.let { capture -> screenshotCommands.execute(9000) { capture(imageId) } }
+                check(capturedPath == null || capturedPath == pngFile) { "Invalid capture destination" }
+                val script = "set -e\n" + (if (capturedPath == null) "screencap -p $pngFile\n" else "") +
+                    "base64 $pngFile > $base64File\nstat -c %s $base64File"
                 screenshotCommand("CAPTURE", listOf("sh", "-c", script), 8000)
             }
 
@@ -449,27 +436,13 @@ class ScreenshotService(
     }
 
     /**
-     * Encodes a Bitmap to base64 string.
+     * Encodes a Bitmap to a WebP base64 string.
      *
      * @param bitmap Bitmap to encode
-     * @param format Explicit compression override; the default chooses the smaller lossless encoding.
-     * @param quality Explicit codec setting; lossless WebP uses this as effort rather than visual quality.
      * @return Base64-encoded string of the compressed image
      *
      */
-    fun encodeBitmapToBase64(
-        bitmap: Bitmap,
-        format: Bitmap.CompressFormat = WEBP_FORMAT,
-        quality: Int = WEBP_QUALITY,
-    ): String {
-        if (format == WEBP_FORMAT && quality == WEBP_QUALITY) {
-            return encodeToBase64(ScreenshotCompression.encode(bitmap))
-        }
-        val outputStream = ByteArrayOutputStream()
-        check(bitmap.compress(format, quality, outputStream)) { "Unable to encode screenshot" }
-        check(outputStream.size() > 0) { "Screenshot encoder returned no image data" }
-        return encodeToBase64(outputStream.toByteArray())
-    }
+    fun encodeBitmapToBase64(bitmap: Bitmap): String = encodeToBase64(ScreenshotCompression.encode(bitmap))
 
     /**
      * Creates a Screenshot object from a Bitmap.

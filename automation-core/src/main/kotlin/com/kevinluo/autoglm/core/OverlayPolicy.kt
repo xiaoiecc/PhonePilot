@@ -12,6 +12,7 @@ data class OverlaySnapshot(
     val minimized: Boolean = false,
     val runId: String? = null,
     val runActive: Boolean = false,
+    val deviceToolsRequested: Boolean = false,
     val completionVisible: Boolean = false,
     val hiddenLeaseCount: Int = 0,
     val pauseVisibilityCount: Int = 0,
@@ -39,7 +40,7 @@ class OverlayPolicy {
         if (mutableSnapshot.value.userEnabled || mutableSnapshot.value.runActive) disableUser() else enableUser()
     }
 
-    /** Closing an active window is paired with Stop by the app command facade. */
+    /** Close only the surface; the task owner separately accepts Pause/Stop commands. */
     fun close() = synchronized(lock) {
         generation++
         hidden.clear()
@@ -72,7 +73,8 @@ class OverlayPolicy {
             run.phase == RunPhase.IDLE -> false
             else -> old.completionVisible
         }
-        publish(old.copy(runId = run.runId, runActive = run.phase.isActive, completionVisible = completion))
+        publish(old.copy(runId = run.runId, runActive = run.phase.isActive,
+            deviceToolsRequested = run.deviceToolsRequested, completionVisible = completion))
     }
 
     fun acquireHide(): OverlayLease = acquireLease(hidden)
@@ -101,8 +103,8 @@ class OverlayPolicy {
     }
 
     private fun publish(state: OverlaySnapshot) {
-        val base = (state.runActive && suppressedRun != state.runId) || state.completionVisible ||
-            (state.userEnabled && !state.appInForeground)
+        val automaticRun = state.runActive && state.deviceToolsRequested && suppressedRun != state.runId
+        val base = automaticRun || state.completionVisible || (state.userEnabled && !state.appInForeground)
         mutableSnapshot.value = state.copy(visible = base && (hidden.isEmpty() || pauseVisibility.isNotEmpty()),
             hiddenLeaseCount = hidden.size, pauseVisibilityCount = pauseVisibility.size)
     }

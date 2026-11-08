@@ -20,10 +20,10 @@ class RunCoordinatorTest {
         var canResume = false
         var restoreAccepted = true
         var cancellations = 0
-        val queued = mutableListOf<String>()
-        var body: suspend (String, Boolean, RunControl) -> RunOutcome = { _, _, _ -> RunOutcome(true, "done", 1, session) }
-        override suspend fun run(task: String, continueConversation: Boolean, control: RunControl): RunOutcome = body(task, continueConversation, control)
-        override fun enqueueMessage(text: String): Boolean { queued += text; return true }
+        val queued = mutableListOf<ChatInput>()
+        var body: suspend (ChatInput, Boolean, RunControl) -> RunOutcome = { _, _, _ -> RunOutcome(true, "done", 1, session) }
+        override suspend fun run(input: ChatInput, continueConversation: Boolean, control: RunControl): RunOutcome = body(input, continueConversation, control)
+        override fun enqueueMessage(input: ChatInput): Boolean { queued += input; return true }
         override fun restoreConversation(session: ConversationSnapshot, messages: List<ChatMessage>): Boolean {
             if (!restoreAccepted) return false
             this.session = session
@@ -33,6 +33,22 @@ class RunCoordinatorTest {
         override fun snapshot() = session
         override fun canContinue() = canResume
         override fun cancelNetwork() { cancellations++ }
+    }
+
+    @Test fun `a submission retains multiple image references in order`() = runTest {
+        val runner = Runner()
+        var received: ChatInput? = null
+        runner.body = { input, _, control ->
+            received = input
+            control.emit(RunProgress.UserMessage(input.text, images = input.images))
+            RunOutcome(true, "done", 1)
+        }
+        val coordinator = RunCoordinator(this, { runner })
+        val images = listOf(ChatImage("first.webp", "image/webp"), ChatImage("second.webp", "image/webp"))
+        assertTrue(coordinator.submit("", images = images))
+        advanceUntilIdle()
+        assertEquals(images, received!!.images)
+        assertEquals(images, coordinator.messages.value.single().images)
     }
 
     @Test fun `terminal is published once after runner cleanup and persistence finish`() = runTest {
@@ -92,6 +108,34 @@ class RunCoordinatorTest {
         advanceUntilIdle()
     }
 
+    @Test fun `device presentation can be requested again but stale progress is ignored`() = runTest {
+        val runner = Runner()
+        var old: RunControl? = null
+        runner.body = { _, _, control ->
+            old = control
+            control.emit(RunProgress.DeviceToolsRequested)
+            control.emit(RunProgress.DeviceToolsRequested)
+            RunOutcome(true, "done", 1)
+        }
+        val coordinator = RunCoordinator(this, { runner })
+        val requests = mutableListOf<String>()
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
+            coordinator.deviceToolRequests.collect { requests += it }
+        }
+        coordinator.submit("first")
+        advanceUntilIdle()
+        assertTrue(coordinator.snapshot.value.deviceToolsRequested)
+        assertEquals(2, requests.size)
+
+        runner.body = { _, _, _ -> RunOutcome(true, "done", 1) }
+        coordinator.submit("second", forceNew = true)
+        advanceUntilIdle()
+        assertFalse(coordinator.snapshot.value.deviceToolsRequested)
+        old!!.emit(RunProgress.DeviceToolsRequested)
+        assertFalse(coordinator.snapshot.value.deviceToolsRequested)
+        assertEquals(2, requests.size)
+    }
+
     @Test fun `draft clearing and queued messages never release a manual pause`() = runTest {
         val runner = Runner()
         val request = CompletableDeferred<Unit>()
@@ -106,7 +150,7 @@ class RunCoordinatorTest {
         assertEquals(setOf(PauseReason.USER), coordinator.snapshot.value.pauseReasons)
         coordinator.pauseForDraft()
         assertTrue(coordinator.submit("new requirement"))
-        assertEquals(listOf("new requirement"), runner.queued)
+        assertEquals(listOf("new requirement"), runner.queued.map { it.text })
         request.complete(Unit)
         runCurrent()
         assertEquals(0, executed)

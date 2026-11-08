@@ -28,6 +28,21 @@
                 android:textColor="@color/primary"
                 android:textSize="12sp" />
 
+            <HorizontalScrollView
+                android:id="@+id/chatMessageImageScroll"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="8dp"
+                android:scrollbars="none"
+                android:visibility="gone">
+
+                <LinearLayout
+                    android:id="@+id/chatMessageImages"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal" />
+            </HorizontalScrollView>
+
             <TextView
                 android:id="@+id/chatMessageText"
                 android:layout_width="wrap_content"

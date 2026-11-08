@@ -46,7 +46,7 @@ internal interface KeyboardEditor {
     fun commitText(text: String, cursorPosition: Int): Boolean
 }
 
-internal data class KeyboardEditorToken(val generation: Long)
+internal data class KeyboardEditorToken(val generation: Long, val packageName: String? = null)
 
 /** One app-process endpoint; stale callbacks and editor leases cannot target a new field. */
 internal class KeyboardGateway(private val dispatcher: CoroutineDispatcher = Dispatchers.Main.immediate) {
@@ -54,8 +54,8 @@ internal class KeyboardGateway(private val dispatcher: CoroutineDispatcher = Dis
     private val endpoint = MutableStateFlow<Endpoint?>(null)
     private var generation = 0L
 
-    fun activate(owner: Any, editor: KeyboardEditor): KeyboardEditorToken = synchronized(this) {
-        KeyboardEditorToken(++generation).also { endpoint.value = Endpoint(owner, it, editor) }
+    fun activate(owner: Any, editor: KeyboardEditor, packageName: String? = null): KeyboardEditorToken = synchronized(this) {
+        KeyboardEditorToken(++generation, packageName).also { endpoint.value = Endpoint(owner, it, editor) }
     }
 
     fun deactivate(owner: Any, token: KeyboardEditorToken?) = synchronized(this) {

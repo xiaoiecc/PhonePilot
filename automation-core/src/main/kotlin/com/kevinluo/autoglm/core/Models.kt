@@ -12,7 +12,14 @@ data class ConversationSnapshot(
 
 enum class ChatRole { USER, AGENT }
 
-data class ChatMessage(val role: ChatRole, val text: String, val timestamp: Long = System.currentTimeMillis())
+data class ChatImage(val path: String, val mimeType: String)
+data class ChatInput(val text: String, val images: List<ChatImage> = emptyList())
+data class ChatMessage(
+    val role: ChatRole,
+    val text: String,
+    val timestamp: Long = System.currentTimeMillis(),
+    val images: List<ChatImage> = emptyList(),
+)
 
 data class CommandResult(
     val exitCode: Int?,
@@ -42,6 +49,10 @@ enum class RunPhase {
 }
 
 enum class PauseReason { USER, DRAFT }
+enum class ExecutionMode { FOREGROUND, BACKGROUND }
+
+/** A changed observation must be regenerated, never replayed against a new display. */
+class ExecutionTargetChangedException : IllegalStateException("执行位置已变化；原操作未执行，请重新观察并生成操作")
 enum class InteractionKind { CONFIRM, TAKEOVER, CHOICE, TEXT }
 
 sealed interface InteractionReply {
@@ -84,6 +95,11 @@ data class RunSnapshot(
     val pendingInteraction: PendingInteraction? = null,
     val activeWait: ActiveWait? = null,
     val steps: List<RunStep> = emptyList(),
+    val deviceToolsRequested: Boolean = false,
+    val executionMode: ExecutionMode = ExecutionMode.FOREGROUND,
+    val placementGeneration: Long = 0,
+    val placementSwitching: Boolean = false,
+    val placementError: String? = null,
 )
 
 data class RunOutcome(
@@ -101,15 +117,20 @@ sealed interface RunProgress {
     data class StepStarted(val number: Int) : RunProgress
     data class Thinking(val text: String) : RunProgress
     data class Action(val description: String) : RunProgress
-    data class UserMessage(val text: String, val timestamp: Long = System.currentTimeMillis()) : RunProgress
+    data class UserMessage(
+        val text: String,
+        val timestamp: Long = System.currentTimeMillis(),
+        val images: List<ChatImage> = emptyList(),
+    ) : RunProgress
     data class AssistantMessage(val text: String, val timestamp: Long = System.currentTimeMillis()) : RunProgress
     data class Usage(val totalInputTokens: Long?, val totalOutputTokens: Long?) : RunProgress
     data class ConversationChanged(val id: String) : RunProgress
+    data object DeviceToolsRequested : RunProgress
 }
 
 interface AgentRunner {
-    suspend fun run(task: String, continueConversation: Boolean, control: RunControl): RunOutcome
-    fun enqueueMessage(text: String): Boolean
+    suspend fun run(input: ChatInput, continueConversation: Boolean, control: RunControl): RunOutcome
+    fun enqueueMessage(input: ChatInput): Boolean
     fun restoreConversation(session: ConversationSnapshot, messages: List<ChatMessage>): Boolean
     fun snapshot(): ConversationSnapshot
     fun canContinue(): Boolean
@@ -118,6 +139,12 @@ interface AgentRunner {
 
 interface RunControl {
     val runId: String
+    val executionMode: ExecutionMode get() = ExecutionMode.FOREGROUND
+    val placementGeneration: Long get() = 0
+    suspend fun <T> deviceOperation(expectedGeneration: Long? = null, block: suspend () -> T): T {
+        checkpoint()
+        return block()
+    }
     suspend fun checkpoint()
     fun emit(progress: RunProgress)
     suspend fun interact(kind: InteractionKind, prompt: String, options: List<String> = emptyList()): InteractionReply

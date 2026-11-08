@@ -26,7 +26,9 @@ class OpenAiTransportException internal constructor(
     val category: TransportFailureCategory,
     val exceptionClass: String,
     val attempts: Int,
-) : IOException("OpenAI transport failure; category=${category.name.lowercase()}; class=$exceptionClass; attempts=$attempts")
+    val detail: String? = null,
+) : IOException("OpenAI transport failure; category=${category.name.lowercase()}; class=$exceptionClass; attempts=$attempts" +
+    (detail?.let { "; message=$it" } ?: ""))
 
 class OpenAiHttpException internal constructor(
     val status: Int,
@@ -36,12 +38,14 @@ class OpenAiHttpException internal constructor(
     val requestId: String?,
     val retryAfterMillis: Long?,
     val attempts: Int,
+    val errorMessage: String? = null,
 ) : IOException(buildString {
     append("OpenAI API returned HTTP ").append(status).append("; category=http; attempts=").append(attempts)
     errorCode?.let { append("; code=").append(it) }
     errorType?.let { append("; type=").append(it) }
     errorParam?.let { append("; param=").append(it) }
     requestId?.let { append("; request_id=").append(it) }
+    errorMessage?.let { append("; message=").append(it) }
     if (retryAfterMillis != null && retryAfterMillis > ResponsesRetryPolicy.MAX_WAIT_MS) {
         append("; retry_after_ms=").append(retryAfterMillis)
         append(" exceeds maximum_wait_ms=").append(ResponsesRetryPolicy.MAX_WAIT_MS).append("; not retried early")
@@ -58,7 +62,7 @@ internal object ResponsesRetryPolicy {
         "organization_spend_limit_exceeded", "project_spend_limit_exceeded", "organization_usage_limit_exceeded",
     )
 
-    fun transport(error: IOException, attempts: Int): OpenAiTransportException {
+    fun transport(error: IOException, attempts: Int, detail: String? = null): OpenAiTransportException {
         val chain = generateSequence<Throwable>(error) { it.cause }.take(8).toList()
         val tls = chain.firstOrNull { it is SSLException || it is CertificateException || it is CertPathValidatorException }
         val classified = tls ?: chain.firstOrNull { it is ProtocolException || it is UnknownServiceException }
@@ -76,7 +80,7 @@ internal object ResponsesRetryPolicy {
             else -> TransportFailureCategory.NETWORK_IO
         }
         val name = classified.javaClass.simpleName.takeIf { it.matches(Regex("[A-Za-z0-9_$]{1,100}")) } ?: "IOException"
-        return OpenAiTransportException(category, name, attempts)
+        return OpenAiTransportException(category, name, attempts, detail)
     }
 
     fun retryable(error: IOException): Boolean = when (error) {

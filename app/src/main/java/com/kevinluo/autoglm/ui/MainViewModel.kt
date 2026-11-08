@@ -58,6 +58,7 @@ enum class PermissionType {
  * @property currentAction Current action being executed
  * @property isTaskRunning Whether a task is currently running
  * @property canStartTask Whether a new task can be started
+ * @property hasAttachments Whether the composer contains image attachments
  *
  */
 data class MainUiState(
@@ -70,6 +71,7 @@ data class MainUiState(
     val isTaskRunning: Boolean = false,
     val canStartTask: Boolean = false,
     val canContinueConversation: Boolean = false,
+    val hasAttachments: Boolean = false,
 )
 
 /**
@@ -154,10 +156,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val outputLog: StateFlow<String> = _outputLog.asStateFlow()
 
     private val logBuilder = StringBuilder()
-    private val conversationDrafts = mutableMapOf<String?, String>()
+    private val conversationDrafts = ComposerDraftStore()
+    private var attachmentSelection: ComposerDraftStore.ImportTicket? = null
 
-    fun saveDraft(conversationId: String?, text: String) { conversationDrafts[conversationId] = text }
-    fun draftFor(conversationId: String?): String = conversationDrafts[conversationId].orEmpty()
+    fun saveDraft(conversationId: String?, text: String, images: List<com.kevinluo.autoglm.core.ChatImage> = emptyList()) {
+        conversationDrafts.save(conversationId, text, images)
+    }
+    fun draftFor(conversationId: String?): String = conversationDrafts.get(conversationId).text
+    fun attachmentsFor(conversationId: String?): List<com.kevinluo.autoglm.core.ChatImage> =
+        conversationDrafts.get(conversationId).images
+    fun beginAttachmentSelection(conversationId: String?) {
+        attachmentSelection = conversationDrafts.ticket(conversationId)
+    }
+    fun takeAttachmentSelection(): ComposerDraftStore.ImportTicket? =
+        attachmentSelection.also { attachmentSelection = null }
+    fun appendDraftAttachments(ticket: ComposerDraftStore.ImportTicket, images: List<com.kevinluo.autoglm.core.ChatImage>): Boolean =
+        conversationDrafts.append(ticket, images)
+    fun clearDraft(conversationId: String?) = conversationDrafts.clear(conversationId)
 
     // region Cross-Fragment State Sharing
 
@@ -209,6 +224,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         canContinueConversation = TaskExecutionManager.canContinueConversation(),
                     )
 
+            }
+        }
+        viewModelScope.launch {
+            TaskExecutionManager.deviceToolRequests.collect { runId ->
+                _events.emit(MainUiEvent.MinimizeApp(runId))
             }
         }
         viewModelScope.launch {
@@ -306,16 +326,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // endregion
 
     /**
-     * Updates the task input availability based on whether text is entered.
+     * Updates the task input availability based on whether text or images are present.
      *
      * @param hasText Whether the task input field has text
+     * @param hasAttachments Whether the composer has selected images
      *
      */
-    fun updateTaskInput(hasText: Boolean) {
-        _uiState.value =
-            _uiState.value.copy(
-                canStartTask = calculateCanStartTask(hasTaskText = hasText),
-            )
+    fun updateTaskInput(hasText: Boolean, hasAttachments: Boolean = _uiState.value.hasAttachments) {
+        _uiState.value = _uiState.value.copy(
+            hasAttachments = hasAttachments,
+            canStartTask = calculateCanStartTask(hasTaskText = hasText, hasAttachments = hasAttachments),
+        )
     }
 
     /**
@@ -324,6 +345,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      * @param status Current Shizuku status
      * @param hasOverlayPermission Whether overlay permission is granted
      * @param hasTaskText Whether task input has text
+     * @param hasAttachments Whether image attachments are selected
      * @param isRunning Whether a task is currently running
      * @return true if a new task can be started, false otherwise
      */
@@ -331,10 +353,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         status: ShizukuStatus = _uiState.value.shizukuStatus,
         hasOverlayPermission: Boolean = _uiState.value.hasOverlayPermission,
         hasTaskText: Boolean = true,
+        hasAttachments: Boolean = _uiState.value.hasAttachments,
         isRunning: Boolean = _uiState.value.isTaskRunning,
     ): Boolean = status == ShizukuStatus.CONNECTED &&
         hasOverlayPermission &&
-        hasTaskText &&
+        (hasTaskText || hasAttachments) &&
         !isRunning &&
         TaskExecutionManager.canStartTask()
 
@@ -342,26 +365,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      * Starts a new task with the given description.
      *
      * @param taskDescription The description of the task to execute
+     * @param images Selected image attachments in display order
      *
      */
-    fun startTask(taskDescription: String): Boolean {
+    fun startTask(taskDescription: String, images: List<com.kevinluo.autoglm.core.ChatImage> = emptyList()): Boolean {
         val alreadyRunning = TaskExecutionManager.isTaskRunning()
-        if (!TaskExecutionManager.sendMessage(taskDescription)) return false
+        if (!TaskExecutionManager.sendMessage(taskDescription, images)) return false
         if (!alreadyRunning) {
             logBuilder.clear()
             _outputLog.value = ""
-            val runId = TaskExecutionManager.taskState.value.runId
-            if (runId != null) viewModelScope.launch { _events.emit(MainUiEvent.MinimizeApp(runId)) }
         }
         return true
     }
 
-    fun startNewConversation(taskDescription: String): Boolean {
-        if (!TaskExecutionManager.startNewConversation(taskDescription)) return false
+    fun startNewConversation(taskDescription: String, images: List<com.kevinluo.autoglm.core.ChatImage> = emptyList()): Boolean {
+        if (!TaskExecutionManager.startNewConversation(taskDescription, images)) return false
         logBuilder.clear()
         _outputLog.value = ""
-        val runId = TaskExecutionManager.taskState.value.runId
-        if (runId != null) viewModelScope.launch { _events.emit(MainUiEvent.MinimizeApp(runId)) }
         return true
     }
 
@@ -406,6 +426,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      */
     fun resetAgent() {
         Logger.d(TAG, "Resetting agent")
+        conversationDrafts.invalidateImports(TaskExecutionManager.taskState.value.conversationId)
+        conversationDrafts.invalidateImports(null)
         TaskExecutionManager.resetTask()
         logBuilder.clear()
         _outputLog.value = ""

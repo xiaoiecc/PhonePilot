@@ -2,24 +2,27 @@ package com.kevinluo.autoglm.device
 
 import com.kevinluo.autoglm.IUserService
 import com.kevinluo.autoglm.core.CommandResult
+import com.kevinluo.autoglm.display.DisplaySessionClient
 import com.kevinluo.autoglm.util.Point
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 
 /** Typed device primitives. Model-provided strings never become shell syntax. */
-class DeviceExecutor(userService: IUserService) {
+class DeviceExecutor(userService: IUserService, val displays: DisplaySessionClient = DisplaySessionClient(userService)) {
     private val commands = DeviceCommandClient(userService)
     private var cachedTouchDevice: String? = null
 
     suspend fun straightSwipe(startX: Int, startY: Int, endX: Int, endY: Int, durationMs: Int): CommandResult {
         require(listOf(startX, startY, endX, endY).all { it in 0..1000000 })
         require(durationMs in 1..5000)
+        if (displays.state.runId.isNotEmpty()) return displays.input(DisplaySessionClient.SWIPE, startX, startY, endX, endY, durationMs)
         return commands.executeArgs(listOf("input", "swipe", "$startX", "$startY", "$endX", "$endY", "$durationMs"))
     }
 
     suspend fun tap(x: Int, y: Int): CommandResult {
         require(x in 0..1000000 && y in 0..1000000)
+        if (displays.state.runId.isNotEmpty()) return displays.input(DisplaySessionClient.TAP, x, y)
         return commands.executeArgs(listOf("input", "tap", "$x", "$y"))
     }
 
@@ -38,6 +41,10 @@ class DeviceExecutor(userService: IUserService) {
         require(points.size in 2..1000)
         require(points.all { it.x in 0..1000000 && it.y in 0..1000000 })
         require(durationMs in 1..5000)
+        // Physical sendevent has no display routing. An attached session always uses display-bound input.
+        if (displays.state.runId.isNotEmpty()) {
+            return@withContext straightSwipe(points.first().x, points.first().y, points.last().x, points.last().y, durationMs)
+        }
         val device = getTouchDevicePath()
         if (device == null) {
             val start = points.first()
@@ -87,6 +94,7 @@ class DeviceExecutor(userService: IUserService) {
 
     suspend fun pressKey(keyCode: Int): CommandResult {
         require(keyCode in 0..1000)
+        if (displays.state.runId.isNotEmpty()) return displays.input(DisplaySessionClient.KEY, keyCode)
         return commands.executeArgs(listOf("input", "keyevent", "$keyCode"))
     }
 
@@ -99,13 +107,19 @@ class DeviceExecutor(userService: IUserService) {
         val component = lines.firstOrNull { '/' in it }
         if (component != null) {
             if (!isComponentName(packageName, component)) return rejected("Invalid Android launcher component")
+            if (displays.state.runId.isNotEmpty()) return displays.launch(component)
             return commands.executeArgs(listOf("am", "start", "-n", component))
         }
+        if (displays.state.runId.isNotEmpty()) return rejected("No verified launcher component for the target display")
         return commands.executeArgs(listOf("am", "start", "-a", "android.intent.action.MAIN", "-c",
             "android.intent.category.LAUNCHER", "-p", packageName))
     }
 
     suspend fun getCurrentApp(): String {
+        displays.state.takeIf { it.runId.isNotEmpty() }?.let { current ->
+            val fresh = displays.refresh(current.runId, current.generation)
+            return fresh.packageName.takeIf { fresh.success }.orEmpty()
+        }
         val result = commands.executeArgs(listOf("dumpsys", "window"))
         return if (result.succeeded) parseCurrentApp(result.stdout) else ""
     }

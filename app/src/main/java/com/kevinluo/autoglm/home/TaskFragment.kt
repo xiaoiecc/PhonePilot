@@ -1,12 +1,17 @@
 package com.kevinluo.autoglm.home
 
 import android.Manifest
+import android.content.Intent
+import android.net.Uri
 import android.os.Bundle
+import android.provider.MediaStore
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import android.view.inputmethod.InputMethodManager
 import android.widget.ImageButton
+import android.widget.ImageView
+import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
@@ -24,9 +29,11 @@ import com.google.android.material.button.MaterialButton
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.textfield.TextInputEditText
 import com.kevinluo.autoglm.R
+import com.kevinluo.autoglm.core.ChatImage
 import com.kevinluo.autoglm.core.InteractionKind
 import com.kevinluo.autoglm.core.InteractionReply
 import com.kevinluo.autoglm.core.PendingInteraction
+import com.kevinluo.autoglm.history.ChatAttachmentStore
 import com.kevinluo.autoglm.history.HistoryManager
 import com.kevinluo.autoglm.settings.SettingsManager
 import com.kevinluo.autoglm.settings.TaskTemplate
@@ -71,9 +78,22 @@ class TaskFragment : Fragment() {
     private var sessionPicker: ChatSessionPicker? = null
     private var interactionDialog: AlertDialog? = null
     private var displayedInteraction: PendingInteraction? = null
+    private lateinit var attachmentPreview: View
+    private lateinit var attachmentPreviewList: LinearLayout
+    private val selectedAttachments = mutableListOf<ChatImage>()
+    private val attachmentStore by lazy { ChatAttachmentStore.getInstance(requireContext()) }
 
     // Floating Window Button
     private lateinit var btnFloatingWindow: ImageButton
+
+    private val imagePicker = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        val ticket = viewModel.takeAttachmentSelection() ?: return@registerForActivityResult
+        if (result.resultCode != android.app.Activity.RESULT_OK) return@registerForActivityResult
+        val data = result.data ?: return@registerForActivityResult
+        val uris = data.clipData?.let { clips -> List(clips.itemCount) { clips.getItemAt(it).uri } }
+            ?: listOfNotNull(data.data)
+        if (uris.isNotEmpty()) importImages(uris, ticket)
+    }
 
     // Permission request launcher
     private val audioPermissionLauncher =
@@ -119,7 +139,7 @@ class TaskFragment : Fragment() {
         displayedInteraction = null
         sessionPicker?.dismiss()
         sessionPicker = null
-        viewModel.saveDraft(displayedConversationId, taskInput.text?.toString().orEmpty())
+        viewModel.saveDraft(displayedConversationId, taskInput.text?.toString().orEmpty(), selectedAttachments)
         chatMessages.adapter = null
         chatAdapter = null
         voiceInputManager?.release()
@@ -135,6 +155,8 @@ class TaskFragment : Fragment() {
         taskInput = view.findViewById(R.id.taskInput)
         displayedConversationId = TaskExecutionManager.taskState.value.conversationId
         taskInput.setText(viewModel.draftFor(displayedConversationId))
+        selectedAttachments.clear()
+        selectedAttachments += viewModel.attachmentsFor(displayedConversationId)
         btnVoiceInput = view.findViewById(R.id.btnVoiceInput)
         btnSelectTemplate = view.findViewById(R.id.btnSelectTemplate)
         btnStartTask = view.findViewById(R.id.btnStartTask)
@@ -144,11 +166,14 @@ class TaskFragment : Fragment() {
         chatStatus = view.findViewById(R.id.chatStatus)
         chatPause = view.findViewById(R.id.chatPause)
         chatStop = view.findViewById(R.id.chatStop)
+        attachmentPreview = view.findViewById(R.id.attachmentPreview)
+        attachmentPreviewList = view.findViewById(R.id.attachmentPreviewList)
         chatMessages.layoutManager = LinearLayoutManager(requireContext()).apply { stackFromEnd = true }
         chatAdapter = ChatMessageAdapter().also { chatMessages.adapter = it }
 
         // Floating Window Button
         btnFloatingWindow = view.findViewById(R.id.btnFloatingWindow)
+        renderAttachments()
     }
 
     /**
@@ -163,10 +188,13 @@ class TaskFragment : Fragment() {
                 else TaskExecutionManager.loadConversation(conversationId)
             }.also { it.show() }
         }
+        requireView().findViewById<ImageButton>(R.id.btnAddImage).setOnClickListener {
+            openGallery()
+        }
         // Task input text change listener
         taskInput.doAfterTextChanged { text ->
             if (changingComposer) return@doAfterTextChanged
-            viewModel.updateTaskInput(text?.isNotBlank() == true)
+            viewModel.updateTaskInput(text?.isNotBlank() == true, selectedAttachments.isNotEmpty())
             if (text?.isNotBlank() == true && taskInput.hasFocus()) {
                 TaskExecutionManager.pauseForDraft()
             } else if (text.isNullOrBlank()) {
@@ -248,12 +276,15 @@ class TaskFragment : Fragment() {
                         val conversationId = TaskExecutionManager.taskState.value.conversationId
                         val switched = displayedConversationId != conversationId
                         if (switched) {
-                            viewModel.saveDraft(displayedConversationId, taskInput.text?.toString().orEmpty())
+                            viewModel.saveDraft(displayedConversationId, taskInput.text?.toString().orEmpty(), selectedAttachments)
                             changingComposer = true
                             try { taskInput.setText(viewModel.draftFor(conversationId)) }
                             finally { changingComposer = false }
                             displayedConversationId = conversationId
-                            viewModel.updateTaskInput(!taskInput.text.isNullOrBlank())
+                            selectedAttachments.clear()
+                            selectedAttachments += viewModel.attachmentsFor(conversationId)
+                            renderAttachments()
+                            viewModel.updateTaskInput(!taskInput.text.isNullOrBlank(), selectedAttachments.isNotEmpty())
                         }
                         val followLatest = switched || (!restoringChatPosition &&
                             (adapter.itemCount == 0 || !chatMessages.canScrollVertically(1))
@@ -355,7 +386,8 @@ class TaskFragment : Fragment() {
      */
     private fun updateUiState(state: MainUiState) {
         val active = state.taskStatus.isActive
-        btnStartTask.isEnabled = !taskInput.text.isNullOrBlank() &&
+        val hasContent = !taskInput.text.isNullOrBlank() || selectedAttachments.isNotEmpty()
+        btnStartTask.isEnabled = hasContent &&
             (state.canStartTask || state.canContinueConversation || active) && state.taskStatus != TaskStatus.CANCELLING
         btnStartTask.setText(R.string.send_message)
         btnNewConversation.isEnabled = !active && !TaskExecutionManager.isTaskRunning()
@@ -381,13 +413,17 @@ class TaskFragment : Fragment() {
     private fun startTask() {
         val taskDescription = taskInput.text?.toString()?.trim()
 
-        if (taskDescription.isNullOrBlank()) {
+        if (taskDescription.isNullOrBlank() && selectedAttachments.isEmpty()) {
             Toast.makeText(requireContext(), R.string.toast_task_empty, Toast.LENGTH_SHORT).show()
             return
         }
 
         // Capture the displayed question identity; a late send must not answer a newer one.
         displayedInteraction?.takeIf { it.kind == InteractionKind.TEXT }?.let { pending ->
+            if (selectedAttachments.isNotEmpty()) {
+                Toast.makeText(requireContext(), R.string.chat_images_answer_rejected, Toast.LENGTH_SHORT).show()
+                return
+            }
             onSubmissionResult(TaskExecutionManager.replyInteraction(
                 pending.runId, pending.id, InteractionReply.Text(taskDescription),
             ))
@@ -416,7 +452,7 @@ class TaskFragment : Fragment() {
             return
         }
 
-        onSubmissionResult(viewModel.startTask(taskDescription))
+        onSubmissionResult(viewModel.startTask(taskDescription.orEmpty(), selectedAttachments.toList()))
     }
 
     private fun onSubmissionResult(accepted: Boolean) {
@@ -428,7 +464,10 @@ class TaskFragment : Fragment() {
             } finally {
                 changingComposer = false
             }
-            viewModel.updateTaskInput(false)
+            selectedAttachments.clear()
+            renderAttachments()
+            viewModel.updateTaskInput(false, false)
+            viewModel.clearDraft(displayedConversationId)
             taskInput.clearFocus()
             ContextCompat.getSystemService(requireContext(), InputMethodManager::class.java)
                 ?.hideSoftInputFromWindow(taskInput.windowToken, 0)
@@ -436,6 +475,60 @@ class TaskFragment : Fragment() {
         } else {
             Toast.makeText(requireContext(), R.string.chat_submission_rejected, Toast.LENGTH_SHORT).show()
         }
+    }
+
+    private fun openGallery() {
+        val intent = Intent(Intent.ACTION_PICK).apply {
+            setDataAndType(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, "image/*")
+            putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+        }
+        if (intent.resolveActivity(requireContext().packageManager) == null) {
+            Toast.makeText(requireContext(), R.string.chat_gallery_unavailable, Toast.LENGTH_SHORT).show()
+            return
+        }
+        viewModel.saveDraft(displayedConversationId, taskInput.text?.toString().orEmpty(), selectedAttachments)
+        viewModel.beginAttachmentSelection(displayedConversationId)
+        imagePicker.launch(intent)
+    }
+
+    private fun importImages(uris: List<Uri>, ticket: com.kevinluo.autoglm.ui.ComposerDraftStore.ImportTicket) {
+        viewLifecycleOwner.lifecycleScope.launch {
+            try {
+                val imported = attachmentStore.import(uris)
+                if (!viewModel.appendDraftAttachments(ticket, imported)) {
+                    attachmentStore.delete(imported)
+                } else if (displayedConversationId == ticket.conversationId) {
+                    selectedAttachments.clear()
+                    selectedAttachments += viewModel.attachmentsFor(ticket.conversationId)
+                    renderAttachments()
+                }
+            } catch (error: kotlinx.coroutines.CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                Logger.e(TAG, "Unable to import gallery images", error)
+                Toast.makeText(requireContext(), R.string.chat_image_import_failed, Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    private fun renderAttachments() {
+        attachmentPreview.visibility = if (selectedAttachments.isEmpty()) View.GONE else View.VISIBLE
+        attachmentPreviewList.removeAllViews()
+        selectedAttachments.forEach { image ->
+            val row = LayoutInflater.from(requireContext()).inflate(R.layout.item_chat_attachment, attachmentPreviewList, false)
+            val thumbnail = row.findViewById<ImageView>(R.id.attachmentImage)
+            ChatImageDecoder.decode(image.path, 160)?.let(thumbnail::setImageBitmap)
+            row.findViewById<ImageButton>(R.id.attachmentRemove).setOnClickListener {
+                if (selectedAttachments.remove(image)) {
+                    attachmentStore.delete(listOf(image))
+                    renderAttachments()
+                    viewModel.saveDraft(displayedConversationId, taskInput.text?.toString().orEmpty(), selectedAttachments)
+                }
+            }
+            attachmentPreviewList.addView(row)
+        }
+        viewModel.updateTaskInput(!taskInput.text.isNullOrBlank(), selectedAttachments.isNotEmpty())
+        updateUiState(viewModel.uiState.value)
     }
 
     /**

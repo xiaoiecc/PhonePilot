@@ -154,6 +154,22 @@
             android:orientation="vertical"
             android:padding="8dp">
 
+            <HorizontalScrollView
+                android:id="@+id/attachmentPreview"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:paddingStart="8dp"
+                android:paddingEnd="8dp"
+                android:scrollbars="none"
+                android:visibility="gone">
+
+                <LinearLayout
+                    android:id="@+id/attachmentPreviewList"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal" />
+            </HorizontalScrollView>
+
             <com.google.android.material.textfield.TextInputLayout
                 android:id="@+id/taskInputLayout"
                 android:layout_width="match_parent"
@@ -185,6 +201,15 @@
                 android:layout_height="wrap_content"
                 android:gravity="center_vertical"
                 android:orientation="horizontal">
+
+                <ImageButton
+                    android:id="@+id/btnAddImage"
+                    android:layout_width="48dp"
+                    android:layout_height="48dp"
+                    android:background="?attr/selectableItemBackgroundBorderless"
+                    android:contentDescription="@string/chat_add_images"
+                    android:src="@drawable/ic_plus"
+                    app:tint="@color/icon_secondary" />
 
                 <ImageButton
                     android:id="@+id/btnVoiceInput"

@@ -29,6 +29,13 @@ internal sealed interface FunctionCommand {
 internal object ToolCommandDecoder {
     fun commentary(args: JsonObject): String? = Fields(args).string("commentary")?.also { require(it.length <= 280) }
     fun capture(args: JsonObject) { Fields(args).only() }
+    fun computer(args: JsonObject): List<JsonObject> = with(Fields(args)) {
+        only("actions")
+        val actions = (args["actions"] as? JsonArray ?: error("Missing actions"))
+            .map { it as? JsonObject ?: error("Invalid computer action") }
+        require(actions.size in 1..100) { "Invalid computer action count" }
+        actions
+    }
     fun function(call: ComputerFunctionCall): FunctionCommand = with(Fields(call.arguments)) {
         when (call.name) {
             "android_launch_app" -> { only("app"); FunctionCommand.Launch(required("app")) }
@@ -108,6 +115,10 @@ internal object ToolCommandDecoder {
                     "long_click" -> NodeAction.Simple.LONG_CLICK
                     "scroll_forward" -> NodeAction.Simple.SCROLL_FORWARD
                     "scroll_backward" -> NodeAction.Simple.SCROLL_BACKWARD
+                    "scroll_up" -> NodeAction.Simple.SCROLL_UP
+                    "scroll_down" -> NodeAction.Simple.SCROLL_DOWN
+                    "scroll_left" -> NodeAction.Simple.SCROLL_LEFT
+                    "scroll_right" -> NodeAction.Simple.SCROLL_RIGHT
                     "show" -> NodeAction.Simple.SHOW
                     "set_text", "append_text" -> NodeAction.Text(text ?: error("Missing text"), operation == "append_text").also { require(it.value.length <= 10000 && (!it.append || it.value.isNotEmpty())) }
                     "set_selection" -> { require(start != null && end != null && start >= 0 && end >= start); NodeAction.Selection(start, end) }

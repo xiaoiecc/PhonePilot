@@ -39,7 +39,8 @@ object FloatingWindowStateManager {
     fun close(context: Context) {
         initialize(context)
         policy.close()
-        FloatingWindowService.getInstance()?.stopSelf()
+        // Closing the surface does not remove a running task's foreground-service lifetime.
+        if (!policy.snapshot.value.runActive) FloatingWindowService.getInstance()?.stopSelf()
     }
 
     /** Acquire on Main so the physical host is hidden before capture/input can start. */
@@ -63,6 +64,7 @@ object FloatingWindowStateManager {
 
     private fun reconcile(state: OverlaySnapshot) {
         val application = context ?: return
+        if (state.runActive) ensureServiceReady()
         val service = FloatingWindowService.getInstance()
         if (state.visible) {
             if (service == null) ContextCompat.startForegroundService(application, Intent(application, FloatingWindowService::class.java))

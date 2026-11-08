@@ -95,9 +95,9 @@ class HistoryManager private constructor(private val context: Context) {
         return task
     }
 
-    suspend fun recordMessage(role: HistoryMessageRole, text: String) = withContext(Dispatchers.IO) {
+    suspend fun recordMessage(role: HistoryMessageRole, text: String, images: List<com.kevinluo.autoglm.core.ChatImage> = emptyList()) = withContext(Dispatchers.IO) {
         val task = currentTask ?: return@withContext
-        task.messages += HistoryMessage(role, text)
+        task.messages += HistoryMessage(role, text, images = images)
         saveTask(task)
     }
 
@@ -234,7 +234,7 @@ class HistoryManager private constructor(private val context: Context) {
                 ?.let { it.afterScreenshotPath ?: it.beforeScreenshotPath }
         } else currentScreenshotBase64?.let { base64 ->
             try {
-                // Reuse exactly the compressed bytes uploaded to the model (WebP or PNG).
+                // Reuse exactly the compressed WebP bytes uploaded to the model.
                 val webpBytes = Base64.decode(base64, Base64.DEFAULT)
 
                 // Save original screenshot directly without re-compression
@@ -323,6 +323,7 @@ class HistoryManager private constructor(private val context: Context) {
         // Trim old history if needed
         val keptConversations = updatedList.map { it.conversationId }.distinct().take(MAX_HISTORY_COUNT).toSet()
         val removedRuns = updatedList.filter { it.conversationId !in keptConversations }
+        deleteAttachments(removedRuns)
         removedRuns.forEach { deleteTaskFiles(it.id) }
         updatedList.removeAll(removedRuns.toSet())
 
@@ -355,6 +356,7 @@ class HistoryManager private constructor(private val context: Context) {
      *
      */
     suspend fun deleteTask(taskId: String) = withContext(Dispatchers.IO) {
+        deleteAttachments(_historyList.value.filter { it.id == taskId })
         deleteTaskFiles(taskId)
         _historyList.value = _historyList.value.filter { it.id != taskId }
         saveHistoryIndex()
@@ -369,6 +371,7 @@ class HistoryManager private constructor(private val context: Context) {
      *
      */
     suspend fun deleteTasks(taskIds: Set<String>) = withContext(Dispatchers.IO) {
+        deleteAttachments(_historyList.value.filter { it.id in taskIds })
         taskIds.forEach { taskId ->
             deleteTaskFiles(taskId)
         }
@@ -383,9 +386,15 @@ class HistoryManager private constructor(private val context: Context) {
      *
      */
     suspend fun clearAllHistory() = withContext(Dispatchers.IO) {
+        deleteAttachments(_historyList.value)
         historyDir.listFiles()?.forEach { it.deleteRecursively() }
         _historyList.value = emptyList()
         saveHistoryIndex()
+    }
+
+    private fun deleteAttachments(tasks: List<TaskHistory>) {
+        val images = tasks.flatMap { task -> task.messages.flatMap { it.images } }
+        if (images.isNotEmpty()) ChatAttachmentStore.getInstance(context).delete(images)
     }
 
     /**
@@ -489,6 +498,14 @@ class HistoryManager private constructor(private val context: Context) {
                         put("role", message.role.name)
                         put("text", message.text)
                         put("timestamp", message.timestamp)
+                        put("images", buildJsonArray {
+                            message.images.forEach { image ->
+                                add(buildJsonObject {
+                                    put("path", image.path)
+                                    put("mimeType", image.mimeType)
+                                })
+                            }
+                        })
                     })
                 }
             })
@@ -588,6 +605,13 @@ class HistoryManager private constructor(private val context: Context) {
                     role = HistoryMessageRole.valueOf(message.getValue("role").jsonPrimitive.content),
                     text = message.getValue("text").jsonPrimitive.content,
                     timestamp = message.getValue("timestamp").jsonPrimitive.long,
+                    images = message["images"]?.jsonArray?.map { image ->
+                        val item = image.jsonObject
+                        com.kevinluo.autoglm.core.ChatImage(
+                            item.getValue("path").jsonPrimitive.content,
+                            item.getValue("mimeType").jsonPrimitive.content,
+                        )
+                    } ?: emptyList(),
                 )
             }?.toMutableList() ?: mutableListOf()
             val id = json.getValue("id").jsonPrimitive.content

@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="capsule_details">查看进度</string>
+    <string name="capsule_show_progress">展开进度与对话</string>
+    <string name="capsule_hide_progress">收起进度与对话</string>
+    <string name="capsule_fold">收成小球；长按停止</string>
+    <string name="capsule_ball">展开控制；长按停止</string>
+    <string name="capsule_background">转后台</string>
+    <string name="capsule_foreground">切到前台</string>
+    <string name="capsule_mode_front">前台操控</string>
+    <string name="capsule_mode_back">后台操控</string>
+    <string name="capsule_switching">正在切换…</string>
+    <string name="capsule_pause_hint">补充要求，发送后继续…</string>
+    <string name="capsule_send_failed">消息未被接受，输入已保留</string>
+    <string name="capsule_close">关闭悬浮窗</string>
+    <string name="capsule_continue">继续当前任务</string>
+    <string name="capsule_mode_rejected">当前无法切换，任务与页面已保留</string>
+</resources>

@@ -31,14 +31,14 @@ internal class FunctionToolBackend(
     private val swipes: HumanizedSwipeGenerator,
     private val window: () -> FloatingWindowController?,
 ) {
-    suspend fun execute(command: FunctionCommand, frame: Screenshot?, control: RunControl,
+    suspend fun execute(command: FunctionCommand, frame: Screenshot?, control: RunControl, expectedGeneration: Long? = null,
         onAcknowledged: (AgentAction) -> Unit = {}): FunctionToolResult {
         control.checkpoint()
         return when (command) {
             is FunctionCommand.Launch -> {
                 val target = apps.resolvePackageName(command.app)
                     ?: return FunctionToolResult("ERROR: No installed launchable app matched; use android_list_apps to inspect available apps.")
-                val result = device.launchApp(target)
+                val result = control.deviceOperation(expectedGeneration) { device.launchApp(target) }
                 result.requireSuccessful("launch_app")
                 FunctionToolResult("Launched $target", AgentAction.Launch(target), FrameEffect.INVALIDATE)
             }
@@ -51,20 +51,20 @@ internal class FunctionToolBackend(
                     SystemKey.VOLUME_DOWN -> 25 to AgentAction.VolumeDown
                     SystemKey.POWER -> 26 to AgentAction.Power
                 }
-                withOverlayHidden(window(), control::checkpoint) {
+                control.deviceOperation(expectedGeneration) { withOverlayHidden(window()) {
                     device.pressKey(code).requireSuccessful("system_key")
                     onAcknowledged(action)
-                }
+                } }
                 FunctionToolResult("Key accepted", action, FrameEffect.INVALIDATE)
             }
             is FunctionCommand.Input -> {
                 val text = command.text
                 val mode = command.mode
-                val result = withOverlayHidden(window(), control::checkpoint) {
+                val result = control.deviceOperation(expectedGeneration) { withOverlayHidden(window()) {
                     (if (mode == InputMode.REPLACE) textInput.typeText(text) else textInput.appendText(text)).also {
                         if (it.success) onAcknowledged(AgentAction.Type(text))
                     }
-                }
+                } }
                 check(result.success) { result.message }
                 FunctionToolResult("${result.message}; verify the final field in a fresh observation", AgentAction.Type(text), FrameEffect.INVALIDATE)
             }
@@ -107,7 +107,7 @@ internal class FunctionToolBackend(
         if (confirmation != null && (control.interact(InteractionKind.CONFIRM, confirmation) as? InteractionReply.Accepted)?.accepted != true) {
             return FunctionToolResult("User declined the gesture")
         }
-        return withOverlayHidden(window(), control::checkpoint) {
+        return control.deviceOperation(frame.placementGeneration) { withOverlayHidden(window()) {
             when (val gesture = command.gesture) {
                 Gesture.LongPress -> {
                     device.longPress(start.x, start.y, duration).requireSuccessful("long_press")
@@ -122,7 +122,7 @@ internal class FunctionToolBackend(
                         TraceActionMapper.normalized(end.x, frame.originalWidth), TraceActionMapper.normalized(end.y, frame.originalHeight), gesture.humanized), FrameEffect.CAPTURE)
                 }
             }.also { it.action?.let(onAcknowledged) }
-        }
+        } }
     }
 
 }

@@ -21,7 +21,7 @@ object HistoryTimeline {
         /** Execution diagnostics are not assistant utterances. */
         data class Outcome(val historyRunId: String, val reason: String, override val timestamp: Long) : Entry
     }
-    enum class ImageKind(val label: String) { BEFORE("操作前"), ANNOTATED("动作标注"), AFTER("操作后"), ORIGINAL("原始截图") }
+    enum class ImageKind(val label: String) { BEFORE("操作前"), ANNOTATED("动作标注"), AFTER("操作后"), ORIGINAL("原始截图"), ATTACHMENT("用户附件") }
     data class Image(val kind: ImageKind, val path: String)
 
     /** Input runs are chronological; stable sorting preserves tie order and each tool batch. */
@@ -57,7 +57,8 @@ object HistoryTimeline {
     }.sortedBy { it.timestamp }
 
     fun images(entry: Entry): List<Image> = when (entry) {
-        is Entry.Message, is Entry.Outcome -> emptyList()
+        is Entry.Message -> entry.message.images.map { Image(ImageKind.ATTACHMENT, it.path) }
+        is Entry.Outcome -> emptyList()
         is Entry.Tool -> listOfNotNull(
             entry.call.beforeScreenshotPath?.let { Image(ImageKind.BEFORE, it) },
             entry.call.annotatedScreenshotPath?.let { Image(ImageKind.ANNOTATED, it) },
@@ -89,7 +90,9 @@ object HistoryTimeline {
 
     /** Shared by the on-screen cards and export, so errors and truncation cannot disappear. */
     fun text(entry: Entry): String = when (entry) {
-        is Entry.Message -> entry.message.text
+        is Entry.Message -> entry.message.text.ifBlank {
+            if (entry.message.images.isEmpty()) "" else "[图片]"
+        }
         is Entry.Outcome -> "任务结束原因\n${entry.reason}"
         is Entry.Tool -> with(entry.call) {
             val timeFormat = SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS Z", Locale.getDefault())

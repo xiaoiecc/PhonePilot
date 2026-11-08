@@ -7,6 +7,38 @@ import org.junit.jupiter.api.Test
 
 class SemanticSnapshotFormatterTest {
     @Test
+    fun `scroll capabilities are explicit without claiming remaining content or altering identities`() {
+        val node = SemanticNode("list", SemanticKind.SCROLLER, label = "Conversations",
+            actions = listOf(SemanticAction("scroll_forward"), SemanticAction("scroll_up"), SemanticAction("scroll_right")))
+        val snapshot = UiSnapshot("s", "", listOf(node))
+        val text = SemanticSnapshotFormatter.format(snapshot)
+        assertTrue(text.contains("scroll_container=true reported_scroll=forward,up,right"))
+        assertFalse(text.contains("end reached"))
+        assertEquals(listOf(node), snapshot.nodes)
+        val noActions = SemanticSnapshotFormatter.format(UiSnapshot("s", "", listOf(node.copy(actions = emptyList()))))
+        assertTrue(noActions.contains("reported_scroll=none_reported"))
+        assertFalse(noActions.contains("cannot scroll"))
+    }
+
+    @Test
+    fun `empty layout wrappers fold only in presentation and retain original actionable node IDs`() {
+        val wrapper = SemanticNode("wrapper", SemanticKind.GROUP)
+        val list = SemanticNode("list", SemanticKind.SCROLLER, parentId = "wrapper", depth = 1,
+            actions = listOf(SemanticAction("scroll_down")))
+        val row = SemanticNode("row", SemanticKind.BUTTON, label = "Project group, latest preview",
+            parentId = "list", depth = 2, actions = listOf(SemanticAction("click")))
+        val snapshot = UiSnapshot("s", "", listOf(wrapper, list, row))
+        val text = SemanticSnapshotFormatter.format(snapshot)
+        assertFalse(text.contains("group wrapper"))
+        assertTrue(text.contains("\n- scroller list"))
+        assertTrue(text.contains("\n  - button row"))
+        assertEquals("wrapper", snapshot.nodes[1].parentId)
+        assertEquals("list", snapshot.nodes[2].parentId)
+        assertEquals("Project group, latest preview", snapshot.nodes[2].label)
+        assertTrue(SemanticSnapshotFormatter.format(snapshot, includeBounds = true).contains("group wrapper"))
+    }
+
+    @Test
     fun `labels under one actionable ancestor become one target`() {
         val nodes = listOf(
             SemanticNode("n1", SemanticKind.BUTTON, depth = 0, actions = listOf(SemanticAction("click")), childIds = listOf("n2", "n3")),

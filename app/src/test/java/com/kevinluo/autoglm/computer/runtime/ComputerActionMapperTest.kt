@@ -48,6 +48,13 @@ class ComputerActionMapperTest {
         ).forEach { value -> assertThrows(Exception::class.java) { action(value) } }
     }
 
+    @Test fun `official click buttons map to explicit Android actions`() {
+        assertThrows(IllegalStateException::class.java) { action("""{"type":"click","button":"wheel","x":10,"y":10}""") }
+        assertEquals(PreparedAction.Tap(Point(15, 15), longPress = true), action("""{"type":"click","button":"right","x":10,"y":10}"""))
+        assertEquals(PreparedAction.Key(4), action("""{"type":"click","button":"back","x":10,"y":10}"""))
+        assertEquals(PreparedAction.Key(125), action("""{"type":"click","button":"forward","x":10,"y":10}"""))
+    }
+
     @Test fun `type preserves Unicode and existing text semantics`() {
         assertEquals(PreparedAction.Type("你好🙂"), action("""{"type":"type","text":"你好🙂"}"""))
     }

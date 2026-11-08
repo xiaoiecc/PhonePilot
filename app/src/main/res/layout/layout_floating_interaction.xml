@@ -1,68 +1,63 @@
 <?xml version="1.0" encoding="utf-8"?>
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<LinearLayout
+    xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
     android:orientation="vertical"
-    android:padding="12dp">
-
+    android:paddingVertical="8dp">
     <TextView
         android:id="@+id/tv_interaction_message"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:textColor="@color/text_primary"
-        android:textSize="13sp" />
-
-    <EditText
+        android:textColor="@color/capsule_ink"
+        android:textSize="14sp"
+        android:paddingVertical="8dp" />
+    <com.kevinluo.autoglm.ui.capsule.AutoGrowingInput
         android:id="@+id/et_interaction_answer"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginTop="8dp"
-        android:background="@drawable/input_background"
+        android:background="@drawable/capsule_field_background"
         android:hint="@string/reply_hint"
-        android:inputType="textMultiLine"
-        android:minLines="2"
-        android:padding="10dp"
-        android:textColor="@color/text_primary"
-        android:textColorHint="@color/text_hint"
-        android:textSize="13sp"
+        android:inputType="textCapSentences|textMultiLine"
+        android:minHeight="48dp"
+        android:minLines="1"
+        android:maxLines="6"
+        android:padding="12dp"
+        android:textColor="@color/capsule_ink"
+        android:textColorHint="@color/capsule_muted"
+        android:textSize="15sp"
         android:visibility="gone" />
-
     <LinearLayout
         android:id="@+id/interaction_options"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="8dp"
         android:orientation="vertical" />
-
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginTop="8dp"
         android:orientation="horizontal">
-
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btn_interaction_cancel"
+            style="@style/Widget.MaterialComponents.Button.TextButton"
+            android:layout_width="0dp"
+            android:layout_height="48dp"
+            android:layout_marginEnd="4dp"
+            android:layout_weight="1"
+            android:text="@string/dialog_cancel"
+            android:textColor="@color/capsule_muted"
+            app:cornerRadius="16dp" />
         <com.google.android.material.button.MaterialButton
             android:id="@+id/btn_interaction_confirm"
             android:layout_width="0dp"
-            android:layout_height="36dp"
-            android:layout_marginEnd="4dp"
-            android:layout_weight="1"
-            android:text="@string/dialog_confirm"
-            android:textColor="@color/on_primary"
-            android:textSize="12sp"
-            app:backgroundTint="@color/primary"
-            app:cornerRadius="8dp" />
-
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/btn_interaction_cancel"
-            android:layout_width="0dp"
-            android:layout_height="36dp"
+            android:layout_height="48dp"
             android:layout_marginStart="4dp"
             android:layout_weight="1"
-            android:text="@string/dialog_cancel"
-            android:textColor="@color/primary"
-            android:textSize="12sp"
-            app:backgroundTint="@color/button_secondary"
-            app:cornerRadius="8dp" />
+            android:text="@string/dialog_confirm"
+            android:textColor="@color/capsule_on_accent"
+            app:backgroundTint="@color/capsule_accent"
+            app:cornerRadius="16dp" />
     </LinearLayout>
 </LinearLayout>

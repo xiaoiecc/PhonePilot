@@ -189,14 +189,16 @@ class PhoneAgentResponsesTest {
         coVerify(exactly = 0) { h.device.tap(any(), any()) }
     }
 
-    @Test fun `initial observation failure has one authoritative completion`() = runTest {
+    @Test fun `ordinary chat does not read the foreground phone or depend on accessibility`() = runTest {
         val service = mockk<PhoneAccessibilityService>()
         coEvery { service.observe() } throws IllegalStateException("Observation unavailable")
         val h = RunnerHarness(this, service = service)
-        assertFalse(h.run().success)
+        h.respond(finalResponse())
+        assertTrue(h.run().success)
         assertEquals(1, h.completions.size)
-        assertEquals("Observation unavailable", h.completions.single().outcome.message)
-        coVerify(exactly = 1) { h.history.completeTask(false, any()) }
+        coVerify(exactly = 0) { service.observe() }
+        coVerify(exactly = 1) { h.history.completeTask(true, any()) }
+        assertFalse(h.coordinator.snapshot.value.deviceToolsRequested)
     }
 
     @Test fun `usage is projected separately from normal model prose`() = runTest {
@@ -210,17 +212,48 @@ class PhoneAgentResponsesTest {
         assertEquals(60, h.runner.snapshot().totalCachedTokens)
     }
 
-    @Test fun `initial observation yields for existing minimize event`() = runTest {
-        var minimized = false
+    @Test fun `phone observation waits for actual foreground handoff acknowledgement`() = runTest {
+        val handoff = kotlinx.coroutines.CompletableDeferred<Unit>()
         val service = mockk<PhoneAccessibilityService>()
-        coEvery { service.observe() } coAnswers { assertTrue(minimized); UiSnapshot("s1", "tree") }
-        val h = RunnerHarness(this, service = service)
-        h.respond(finalResponse())
+        coEvery { service.execute(UiCommand.Observe(null, null), any()) } coAnswers {
+            assertTrue(handoff.isCompleted)
+            "snapshot_id=s1 tree"
+        }
+        val h = RunnerHarness(this, service = service, beforeDeviceTools = {
+            it.emit(RunProgress.DeviceToolsRequested)
+            handoff.await()
+            it.checkpoint()
+        })
+        h.respond(functionResponse("r1", function("observe", "android_ui", """{"operation":"observe"}""")), finalResponse())
         assertTrue(h.coordinator.submit("task"))
         runCurrent()
-        minimized = true
+        coVerify(exactly = 0) { service.execute(any(), any()) }
+        assertTrue(h.coordinator.snapshot.value.deviceToolsRequested)
+        handoff.complete(Unit)
         advanceUntilIdle()
         assertEquals(RunPhase.COMPLETED, h.coordinator.snapshot.value.phase)
+        coVerify(exactly = 1) { service.execute(any(), any()) }
+    }
+
+    @Test fun `stop during foreground handoff never executes late phone actions`() = runTest {
+        val handoff = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val h = RunnerHarness(this, beforeDeviceTools = { handoff.await(); it.checkpoint() })
+        h.respond(functionResponse("r1", function("home", "android_system_key", """{"key":"HOME"}""")))
+        h.begin()
+        assertTrue(h.coordinator.stop())
+        handoff.complete(Unit)
+        advanceUntilIdle()
+        coVerify(exactly = 0) { h.device.pressKey(any()) }
+        assertEquals(1, h.completions.size)
+    }
+
+    @Test fun `failed foreground handoff fails closed before device execution`() = runTest {
+        val h = RunnerHarness(this, beforeDeviceTools = { error("Foreground handoff unavailable") })
+        h.respond(functionResponse("r1", function("home", "android_system_key", """{"key":"HOME"}""")))
+        assertFalse(h.run().success)
+        coVerify(exactly = 0) { h.device.pressKey(any()) }
+        assertEquals(1, h.completions.size)
+        assertNull(h.runner.snapshot().previousResponseId)
     }
 
     @Test fun `invalid custom coordinate preflights before earlier functions execute`() = runTest {
@@ -265,12 +298,67 @@ class PhoneAgentResponsesTest {
         coVerify(exactly = 0) { h.device.longPress(any(), any(), any()) }
     }
 
-    @Test fun `optional commentary is saved as a normal bubble without a fake operation message`() = runTest {
+    @Test fun `required commentary is saved as a normal bubble without a fake operation message`() = runTest {
         val h = RunnerHarness(this)
         h.respond(functionResponse("r1", function("note", "android_note", """{"message":"remember","commentary":"我先检查结果。"}""")), finalResponse())
         assertTrue(h.run().success)
         assertEquals(listOf("task", "我先检查结果。", "done"), h.coordinator.messages.value.map { it.text })
         coVerify { h.history.recordMessage(HistoryMessageRole.AGENT, "我先检查结果。") }
+    }
+
+    @Test fun `independent calls each publish their own intent before the device action`() = runTest {
+        val h = RunnerHarness(this)
+        h.respond(functionResponse("r1",
+            function("first", "android_system_key", """{"key":"HOME","commentary":"先回到桌面。"}"""),
+            function("second", "android_system_key", """{"key":"BACK","commentary":"再关闭当前面板。"}""")), finalResponse())
+        coEvery { h.device.pressKey(3) } coAnswers {
+            assertEquals("先回到桌面。", h.coordinator.messages.value.last().text)
+            assertEquals("先回到桌面。", h.coordinator.snapshot.value.currentAction)
+            CommandResult(0)
+        }
+        coEvery { h.device.pressKey(4) } coAnswers {
+            assertEquals("再关闭当前面板。", h.coordinator.messages.value.last().text)
+            assertEquals("再关闭当前面板。", h.coordinator.snapshot.value.currentAction)
+            CommandResult(0)
+        }
+        assertTrue(h.run().success)
+        assertEquals(1, h.coordinator.messages.value.count { it.text == "先回到桌面。" })
+        assertEquals(1, h.coordinator.messages.value.count { it.text == "再关闭当前面板。" })
+        coVerify(exactly = 1) { h.device.pressKey(3) }
+        coVerify(exactly = 1) { h.device.pressKey(4) }
+    }
+
+    @Test fun `a missing explanation in a later call rejects the whole batch without side effects`() = runTest {
+        val h = RunnerHarness(this)
+        h.respond(functionResponse("r1",
+            function("first", "android_system_key", """{"key":"HOME","commentary":"先回到桌面。"}"""),
+            com.kevinluo.autoglm.computer.protocol.ComputerFunctionCall("invalid", "android_system_key", obj("""{"key":"BACK"}"""))))
+        assertFalse(h.run().success)
+        coVerify(exactly = 0) { h.device.pressKey(any()) }
+        assertTrue(h.coordinator.messages.value.none { it.text == "先回到桌面。" })
+        assertNull(h.runner.snapshot().previousResponseId)
+    }
+
+    @Test fun `a response generated before placement migration cannot issue nonvisual input on the new target`() = runTest {
+        val h = RunnerHarness(this)
+        val coordinator = RunCoordinator(this, { h.runner }, switchPlacement = { _, _ -> })
+        val response = kotlinx.coroutines.CompletableDeferred<ComputerResponse>()
+        coEvery { h.client.request(any(), null) } coAnswers { response.await() }
+        coEvery { h.client.request(any(), "old-response") } returns finalResponse()
+        assertTrue(coordinator.submit("task"))
+        runCurrent()
+        assertTrue(coordinator.requestExecutionMode(requireNotNull(coordinator.snapshot.value.runId), ExecutionMode.BACKGROUND))
+        runCurrent()
+        assertEquals(1L, coordinator.snapshot.value.placementGeneration)
+        response.complete(functionResponse("old-response", function("old-key", "android_system_key",
+            """{"key":"HOME","commentary":"返回桌面。"}""")))
+        advanceUntilIdle()
+        assertEquals(RunPhase.COMPLETED, coordinator.snapshot.value.phase)
+        coVerify(exactly = 0) { h.device.pressKey(any()) }
+        coVerify { h.client.request(match { input ->
+            input.any { it.jsonObject["call_id"]?.jsonPrimitive?.content == "old-key" &&
+                it.jsonObject["output"]!!.jsonPrimitive.content.contains("not executed", ignoreCase = true) }
+        }, "old-response") }
     }
 
     @Test fun `visual result carries fresh semantic targets for returning to text actions`() = runTest {

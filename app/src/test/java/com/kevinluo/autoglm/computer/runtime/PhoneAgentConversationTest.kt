@@ -33,6 +33,21 @@ class PhoneAgentConversationTest {
         assertEquals(listOf("new task", "new"), h.coordinator.messages.value.map { it.text })
     }
 
+    @Test fun `multiple selected images reach one request and remain visible on the user message`() = runTest {
+        val h = RunnerHarness(this)
+        h.respond(finalResponse())
+        val images = (1..5).map { ChatImage("image-$it.webp", "image/webp") }
+        assertTrue(h.run(ChatInput("Compare these", images)).success)
+        coVerify { h.client.request(match {
+            val wire = it.toString()
+            images.map { image -> "attachment-${image.path}" }.all(wire::contains) &&
+                images.zipWithNext().all { (first, second) ->
+                    wire.indexOf("attachment-${first.path}") < wire.indexOf("attachment-${second.path}")
+                }
+        }, null) }
+        assertEquals(images, h.coordinator.messages.value.first().images)
+    }
+
     @Test fun `changing fixed instructions invalidates the old protocol context`() = runTest {
         val h = RunnerHarness(this)
         h.respond(finalResponse("r1"), finalResponse("r2"))

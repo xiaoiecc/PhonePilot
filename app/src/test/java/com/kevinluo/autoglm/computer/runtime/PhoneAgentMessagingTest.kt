@@ -189,6 +189,24 @@ class PhoneAgentMessagingTest {
         coVerify(exactly = 1) { h.device.pressKey(3) }
     }
 
+    @Test fun `one running message carries all images in selection order`() = runTest {
+        val h = RunnerHarness(this)
+        val images = listOf(ChatImage("first.webp", "image/webp"), ChatImage("second.webp", "image/webp"))
+        coEvery { h.client.request(any(), null) } coAnswers {
+            assertTrue(h.coordinator.submit("Compare new images", images = images))
+            finalResponse("r1", "old answer")
+        }
+        coEvery { h.client.request(any(), "r1") } returns finalResponse("r2", "new answer")
+        assertTrue(h.run().success)
+        coVerify { h.client.request(match {
+            val wire = it.toString()
+            wire.contains("Compare new images") && wire.contains("attachment-first.webp") &&
+                wire.contains("attachment-second.webp") &&
+                wire.indexOf("attachment-first.webp") < wire.indexOf("attachment-second.webp")
+        }, "r1") }
+        assertEquals(images, h.coordinator.messages.value.first { it.text == "Compare new images" }.images)
+    }
+
     @Test fun `history finalization rejects new input and releases one completion afterwards`() = runTest {
         val h = RunnerHarness(this)
         val finalizing = CompletableDeferred<Unit>()
@@ -199,7 +217,7 @@ class PhoneAgentMessagingTest {
         assertTrue(finalizing.isCompleted)
         assertTrue(h.coordinator.isBusy)
         assertFalse(h.coordinator.submit("must stay in editor"))
-        assertFalse(h.runner.enqueueMessage("cannot accept while saving"))
+        assertFalse(h.runner.enqueueMessage(ChatInput("cannot accept while saving")))
         release.complete(Unit)
         assertTrue(h.settle().success)
         assertEquals(1, h.completions.size)

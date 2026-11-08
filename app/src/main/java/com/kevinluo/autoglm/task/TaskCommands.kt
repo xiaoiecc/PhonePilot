@@ -18,14 +18,22 @@ object TaskExecutionManager {
     private var applicationContext: Context? = null
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     internal val coordinator = RunCoordinator(scope, { components()?.phoneAgent }, onFinalize = { _, outcome ->
+        val releaseError = runCatching { components()?.releaseExecutionPlacement() }.exceptionOrNull()
         val history = components()?.historyManager
         outcome.session?.let { history?.updateConversationSession(it) }
-        history?.completeTask(outcome.success, outcome.message)
+        history?.completeTask(outcome.success && releaseError == null,
+            outcome.message + if (releaseError != null) "；应用归还未完成" else "")
         applicationContext?.let(AgentNotificationHelper::cancel)
+        if (releaseError != null) throw releaseError
+    }, switchPlacement = { runId, mode ->
+        checkNotNull(components()).switchExecutionPlacement(runId, mode)
     })
     val taskState: StateFlow<TaskExecutionState> = ProjectedStateFlow(coordinator.snapshot, ::TaskExecutionState)
     val messages: StateFlow<List<HistoryMessage>> = ProjectedStateFlow(coordinator.messages) { messages ->
-        messages.map { HistoryMessage(if (it.role == ChatRole.USER) HistoryMessageRole.USER else HistoryMessageRole.AGENT, it.text, it.timestamp) }
+        messages.map {
+            HistoryMessage(if (it.role == ChatRole.USER) HistoryMessageRole.USER else HistoryMessageRole.AGENT,
+                it.text, it.timestamp, it.images)
+        }
     }
     val steps: StateFlow<List<TaskStep>> = ProjectedStateFlow(coordinator.snapshot) { state ->
         state.steps.map { TaskStep(it.stepNumber, it.thinking, it.action) }
@@ -33,6 +41,22 @@ object TaskExecutionManager {
     val activeWait: StateFlow<ActiveWait?> = ProjectedStateFlow(coordinator.snapshot) { it.activeWait }
     val pendingInteraction: StateFlow<PendingInteraction?> = ProjectedStateFlow(coordinator.snapshot) { it.pendingInteraction }
     val completions get() = coordinator.completions
+    val deviceToolRequests get() = coordinator.deviceToolRequests
+    val executionMode: StateFlow<ExecutionMode> = ProjectedStateFlow(coordinator.snapshot) { it.executionMode }
+    val placementSwitching: StateFlow<Boolean> = ProjectedStateFlow(coordinator.snapshot) { it.placementSwitching }
+    val placementError: StateFlow<String?> = ProjectedStateFlow(coordinator.snapshot) { it.placementError }
+
+    fun requestExecutionMode(mode: ExecutionMode): Boolean = coordinator.snapshot.value.runId?.let {
+        coordinator.requestExecutionMode(it, mode)
+    } ?: false
+
+    fun sendAndResume(text: String): Boolean {
+        val pending = pendingInteraction.value
+        if (pending != null) return if (pending.kind == InteractionKind.TEXT) {
+            coordinator.reply(pending.runId, pending.id, InteractionReply.Text(text.trim()))
+        } else false
+        return (coordinator.isBusy || canStartTask()) && coordinator.submit(text, resumePaused = true)
+    }
 
     fun initialize(context: Context) {
         if (applicationContext != null) return
@@ -59,17 +83,20 @@ object TaskExecutionManager {
     fun canStartTask(): Boolean = getStartTaskBlockReason() == StartTaskBlockReason.NONE
     fun isTaskRunning(): Boolean = coordinator.isBusy
     fun canContinueConversation(): Boolean = coordinator.canContinue
-    fun startTask(description: String): Boolean = canStartTask() && coordinator.submit(description, forceNew = true)
-    fun startNewConversation(description: String): Boolean = startTask(description)
-    fun continueConversation(message: String): Boolean = canStartTask() && coordinator.canContinue && coordinator.submit(message)
+    fun startTask(description: String, images: List<ChatImage> = emptyList()): Boolean =
+        canStartTask() && coordinator.submit(description, forceNew = true, images = images)
+    fun startNewConversation(description: String, images: List<ChatImage> = emptyList()): Boolean = startTask(description, images)
+    fun continueConversation(message: String, images: List<ChatImage> = emptyList()): Boolean =
+        canStartTask() && coordinator.canContinue && coordinator.submit(message, images = images)
 
-    fun sendMessage(text: String): Boolean {
-        if (text.isBlank()) return false
+    fun sendMessage(text: String, images: List<ChatImage> = emptyList()): Boolean {
+        if (text.isBlank() && images.isEmpty()) return false
         val pending = pendingInteraction.value
         if (pending?.kind == InteractionKind.TEXT) {
+            if (images.isNotEmpty()) return false
             return coordinator.reply(pending.runId, pending.id, InteractionReply.Text(text.trim()))
         }
-        return (coordinator.isBusy || canStartTask()) && coordinator.submit(text)
+        return (coordinator.isBusy || canStartTask()) && coordinator.submit(text, images = images)
     }
     fun pauseTask() = coordinator.pauseUser()
     fun resumeTask() = coordinator.resumeUser()
@@ -90,7 +117,8 @@ object TaskExecutionManager {
     suspend fun loadConversation(id: String): Boolean = coordinator.loadConversation {
         components()?.historyManager?.loadConversation(id)?.let { restored ->
             RestoredConversation(restored.session, restored.messages.map {
-                ChatMessage(if (it.role == HistoryMessageRole.USER) ChatRole.USER else ChatRole.AGENT, it.text, it.timestamp)
+                ChatMessage(if (it.role == HistoryMessageRole.USER) ChatRole.USER else ChatRole.AGENT,
+                    it.text, it.timestamp, it.images)
             })
         }
     }

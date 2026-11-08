@@ -80,7 +80,7 @@ class ResponsesTransportRetryTest {
                 calls.incrementAndGet()
                 when (scenario) {
                     "auth" -> reply(chain, 403, "fixture-key raw secret headers")
-                    "quota" -> reply(chain, 429, """{"error":{"code":"insufficient_quota","type":"insufficient_quota","message":"fixture-key secret body"}}""", mapOf("x-request-id" to "req_safe"))
+                    "quota" -> reply(chain, 429, """{"error":{"code":"insufficient_quota","type":"insufficient_quota","message":"Quota exceeded; token=private-token fixture-key"}}""", mapOf("x-request-id" to "req_safe"))
                     "parse" -> reply(chain, body = "fixture-key invalid JSON")
                     else -> throw SSLPeerUnverifiedException("fixture-key certificate host details")
                 }
@@ -90,7 +90,9 @@ class ResponsesTransportRetryTest {
                 assertEquals(1, calls.get(), scenario)
                 assertFalse(failure.toString().contains("fixture-key"), scenario)
                 assertFalse(failure.toString().contains("secret body"), scenario)
+                assertFalse(failure.toString().contains("private-token"), scenario)
                 if (scenario == "quota") {
+                    assertTrue(failure.toString().contains("Quota exceeded"), scenario)
                     assertEquals("insufficient_quota", (failure as OpenAiHttpException).errorCode)
                     assertEquals("req_safe", failure.requestId)
                 }

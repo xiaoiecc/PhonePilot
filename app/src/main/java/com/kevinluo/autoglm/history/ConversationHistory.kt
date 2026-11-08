@@ -33,7 +33,7 @@ object ConversationHistory {
         val runs = grouped.asReversed().sortedBy { it.startTime }
         val latest = runs.last()
         val messages = messages(runs)
-        ConversationSummary(latest.conversationId, runs.first().taskDescription, runs.first().startTime,
+        ConversationSummary(latest.conversationId, displayTitle(runs.first()), runs.first().startTime,
             runs.maxOf { run -> maxOf(run.startTime, run.endTime ?: run.startTime,
                 run.messages.maxOfOrNull { it.timestamp } ?: run.startTime,
                 run.steps.maxOfOrNull { it.timestamp } ?: run.startTime) },
@@ -46,11 +46,15 @@ object ConversationHistory {
     fun detail(tasks: List<TaskHistory>, conversationId: String): TaskHistory? {
         val runs = runs(tasks, conversationId)
         val latest = runs.lastOrNull() ?: return null
-        return latest.copy(taskDescription = runs.first().taskDescription, startTime = runs.first().startTime,
+        return latest.copy(taskDescription = displayTitle(runs.first()), startTime = runs.first().startTime,
             endTime = if (runs.any { it.endTime == null }) null else runs.maxOf { it.endTime!! },
             steps = runs.flatMap { it.steps }.sortedBy { it.timestamp }.mapIndexed { index, step ->
                 step.copy(stepNumber = index + 1)
             }.toMutableList(), messages = messages(runs).toMutableList(),
             toolCalls = runs.flatMap { it.toolCalls }.sortedBy { it.startedAt }.toMutableList())
+    }
+
+    private fun displayTitle(task: TaskHistory): String = task.taskDescription.ifBlank {
+        if (task.messages.any { it.images.isNotEmpty() }) "[图片]" else task.taskDescription
     }
 }

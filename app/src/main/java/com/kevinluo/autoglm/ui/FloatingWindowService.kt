@@ -1,13 +1,15 @@
 package com.kevinluo.autoglm.ui
 
-import android.app.Service
+import android.animation.ValueAnimator
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
-import android.content.pm.ServiceInfo
+import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.graphics.PixelFormat
+import android.graphics.Rect
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
 import android.os.IBinder
@@ -16,28 +18,34 @@ import android.view.Gravity
 import android.view.LayoutInflater
 import android.view.MotionEvent
 import android.view.View
+import android.view.ViewTreeObserver
 import android.view.WindowManager
+import android.view.animation.PathInterpolator
 import android.view.inputmethod.InputMethodManager
 import android.widget.EditText
 import android.widget.ImageButton
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
-import androidx.core.content.ContextCompat
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
+import androidx.core.content.ContextCompat
 import androidx.core.widget.doAfterTextChanged
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.google.android.material.button.MaterialButton
 import com.kevinluo.autoglm.MainActivity
 import com.kevinluo.autoglm.R
-import com.kevinluo.autoglm.home.ChatMessageAdapter
-import com.kevinluo.autoglm.core.PendingInteraction
+import com.kevinluo.autoglm.core.ExecutionMode
 import com.kevinluo.autoglm.core.InteractionKind
 import com.kevinluo.autoglm.core.InteractionReply
-import com.kevinluo.autoglm.task.TaskExecutionManager
+import com.kevinluo.autoglm.core.PendingInteraction
+import com.kevinluo.autoglm.home.ChatMessageAdapter
 import com.kevinluo.autoglm.screenshot.ScopedFloatingWindowController
+import com.kevinluo.autoglm.task.TaskExecutionManager
+import com.kevinluo.autoglm.ui.capsule.AutoGrowingInput
+import com.kevinluo.autoglm.ui.capsule.CapsulePresentation
+import com.kevinluo.autoglm.ui.capsule.CapsuleDragLayout
 import com.kevinluo.autoglm.util.Logger
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -45,81 +53,45 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.math.abs
+import kotlin.math.roundToInt
 
-/**
- * Enum representing the current status of a task in the floating window.
- *
- * Used to track and display the execution state of agent tasks.
- *
- */
 enum class TaskStatus {
-    /** No task is currently running. */
-    IDLE,
-
-    /** A task is actively being executed. */
-    RUNNING,
-
-    /** Task execution has been paused by the user. */
-    PAUSED,
-
-    /** Stop has been requested; the prior run still owns cleanup. */
-    CANCELLING,
-
-    /** Task has completed successfully. */
-    COMPLETED,
-
-    /** Task has failed due to an error. */
-    FAILED,
-
-    /** Waiting for user confirmation to proceed. */
-    WAITING_CONFIRMATION,
-
-    /** Waiting for user to take over control. */
-    WAITING_TAKEOVER,
-
-    /** Waiting for a free-form user reply. */
-    WAITING_FOR_USER,
+    IDLE, RUNNING, PAUSED, CANCELLING, COMPLETED, FAILED,
+    WAITING_CONFIRMATION, WAITING_TAKEOVER, WAITING_FOR_USER,
 }
 
-/** Read-only task/chat renderer and Android window host; user gestures submit facade commands. */
-class FloatingWindowService :
-    Service(),
-    ScopedFloatingWindowController {
+/** Window host and read-only presentation. No device capability or independent task lifecycle. */
+class FloatingWindowService : Service(), ScopedFloatingWindowController {
     private var windowManager: WindowManager? = null
     private var floatingView: View? = null
     private var layoutParams: WindowManager.LayoutParams? = null
-
-    private var isAttached = AtomicBoolean(false)
-    private var lastInteractionKey: Pair<String, Long>? = null
-
-    // Coroutine scope for UI operations - uses SupervisorJob so child failures don't cancel siblings
+    private val isAttached = AtomicBoolean(false)
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
-
-    // Conversation presentation only; task execution belongs to the coordinator.
     private val chatAdapter = ChatMessageAdapter()
+    private var lastInteractionKey: Pair<String, Long>? = null
+    private var detailsExpanded = false
+    private var sizeAnimator: ValueAnimator? = null
+    private var targetWidth = 0
+    private var targetHeight = 0
+    private var layoutPosted = false
+    private var bodyExpanded = false
+    private var bodyFadeGeneration = 0L
+    private var rebindingDraft = false
+    private var draftConversationId: String? = null
+    private var draftBound = false
+    private val drafts = ComposerDraftStore()
+    private var keyboardRequestGeneration = 0L
+    private var keyboardRequestCleanup: (() -> Unit)? = null
 
     companion object {
         private const val TAG = "FloatingWindow"
-
-        // Window size as percentage of screen
-        private const val WIDTH_PERCENT = 0.80f
-        private const val HEIGHT_PERCENT = 0.70f
-
-        @Volatile
-        private var instance: FloatingWindowService? = null
-
+        @Volatile private var instance: FloatingWindowService? = null
         fun getInstance(): FloatingWindowService? = instance
-
         fun canDrawOverlays(context: Context): Boolean = Settings.canDrawOverlays(context)
-
         fun requestOverlayPermission(context: Context) {
-            val intent =
-                Intent(
-                    Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                    android.net.Uri.parse("package:${context.packageName}"),
-                )
-            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            context.startActivity(intent)
+            context.startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                android.net.Uri.parse("package:${context.packageName}")).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
         }
     }
 
@@ -128,269 +100,286 @@ class FloatingWindowService :
         instance = this
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
         FloatingWindowStateManager.initialize(applicationContext)
-        Logger.d(TAG, "Service created")
         observeTaskState()
     }
 
-    /**
-     * Observes TaskExecutionManager state flows and updates UI accordingly.
-     *
-     * Starts coroutines to observe taskState and steps StateFlows.
-     * These coroutines are cancelled in onDestroy when serviceScope is cancelled.
-     */
     private fun observeTaskState() {
         serviceScope.launch {
             TaskExecutionManager.messages.collect { messages ->
                 val list = floatingView?.findViewById<RecyclerView>(R.id.steps_recycler_view)
                 val follow = list?.canScrollVertically(1) != true
                 chatAdapter.submitMessages(messages)
-                if (messages.isNotEmpty() && !FloatingWindowStateManager.snapshot.value.minimized) list?.visibility = View.VISIBLE
                 if (follow && messages.isNotEmpty()) list?.scrollToPosition(messages.lastIndex)
+                render()
             }
         }
-        serviceScope.launch { TaskExecutionManager.taskState.collect { updateUIFromTaskState(it) } }
-        serviceScope.launch { TaskExecutionManager.pendingInteraction.collect { renderInteraction(it) } }
         serviceScope.launch {
-            TaskExecutionManager.activeWait.collect { active ->
-                floatingView?.findViewById<MaterialButton>(R.id.btn_finish_wait)?.visibility =
-                    if (active == null || FloatingWindowStateManager.snapshot.value.minimized) View.GONE else View.VISIBLE
-            }
-        }
-    }
-    /**
-     * Updates the UI based on TaskExecutionState from TaskExecutionManager.
-     *
-     * @param state The current task execution state
-     */
-    private fun updateUIFromTaskState(state: com.kevinluo.autoglm.task.TaskExecutionState) {
-        val view = floatingView ?: return
-        view.findViewById<MaterialButton>(R.id.btn_new_task)?.isEnabled = !state.isExecuting
-        view.findViewById<MaterialButton>(R.id.btn_start)?.isEnabled = state.status != TaskStatus.CANCELLING
-        view.findViewById<MaterialButton>(R.id.btn_stop)?.isEnabled = state.status != TaskStatus.CANCELLING
-        view.findViewById<TextView>(R.id.token_usage)?.text = getString(
-            R.string.overlay_token_usage, formatTokenCount(state.totalInputTokens), formatTokenCount(state.totalOutputTokens),
-        )
-        updateStatusIndicator(state.status)
-        updateUIForStatus(state.status)
-        view.findViewById<TextView>(R.id.tv_step_counter)?.text = getString(R.string.step_counter_format, state.stepNumber)
-        showResult(state.resultMessage, state.status)
-        applyMinimizedPresentation(FloatingWindowStateManager.snapshot.value.minimized)
-    }
-    /**
-     * Updates the status indicator UI elements.
-     *
-     * @param status The current task status
-     */
-    private fun updateStatusIndicator(status: TaskStatus) {
-        floatingView?.let { view ->
-            val statusText = view.findViewById<TextView>(R.id.tv_status)
-            val indicator = view.findViewById<View>(R.id.status_indicator)
-
-            val (textRes, colorRes) =
-                when (status) {
-                    TaskStatus.IDLE -> R.string.task_status_idle to R.color.status_idle
-                    TaskStatus.RUNNING -> R.string.task_status_running to R.color.status_running
-                    TaskStatus.PAUSED -> R.string.task_status_paused to R.color.status_paused
-                    TaskStatus.CANCELLING -> R.string.task_status_cancelling to R.color.status_waiting
-                    TaskStatus.COMPLETED -> R.string.task_status_completed to R.color.status_completed
-                    TaskStatus.FAILED -> R.string.task_status_failed to R.color.status_failed
-                    TaskStatus.WAITING_CONFIRMATION -> R.string.floating_waiting_confirm to R.color.status_waiting
-                    TaskStatus.WAITING_TAKEOVER, TaskStatus.WAITING_FOR_USER -> R.string.takeover_title to R.color.status_waiting
+            var previouslyPausedRun: String? = null
+            TaskExecutionManager.taskState.collect { state ->
+                if (state.status == TaskStatus.PAUSED && previouslyPausedRun != state.runId) {
+                    FloatingWindowStateManager.setMinimized(false)
                 }
-
-            statusText?.text = getString(textRes)
-            indicator?.let {
-                val drawable =
-                    (it.background as? GradientDrawable)
-                        ?: GradientDrawable().also { d -> it.background = d }
-                drawable.shape = GradientDrawable.OVAL
-                drawable.setColor(ContextCompat.getColor(this@FloatingWindowService, colorRes))
+                previouslyPausedRun = state.runId.takeIf { state.status == TaskStatus.PAUSED }
+                render()
             }
         }
+        serviceScope.launch { TaskExecutionManager.pendingInteraction.collect { renderInteraction(it); render() } }
+        serviceScope.launch {
+            var lastWait: Pair<String, Long>? = null
+            TaskExecutionManager.activeWait.collect { wait ->
+                val key = wait?.let { it.runId to it.id }
+                if (key != null && key != lastWait) FloatingWindowStateManager.setMinimized(false)
+                lastWait = key
+                render()
+            }
+        }
+        serviceScope.launch { TaskExecutionManager.executionMode.collect { render() } }
+        serviceScope.launch { TaskExecutionManager.placementSwitching.collect { render() } }
+        serviceScope.launch { TaskExecutionManager.placementError.collect { render() } }
     }
 
-    /**
-     * Updates the steps list from TaskExecutionManager.
-     *
-     * @param steps The list of task steps from TaskExecutionManager
-     */
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         startOverlayForeground()
-        if (floatingView == null && canDrawOverlays(this)) {
-            createWindowView()
-        }
-        // START_STICKY does not replay the old show() call after service recreation.
+        if (floatingView == null && canDrawOverlays(this)) createWindowView()
         if (FloatingWindowStateManager.shouldBeVisible()) show()
         return START_STICKY
     }
 
     private fun startOverlayForeground() {
         val channel = "automation_overlay"
-        if (Build.VERSION.SDK_INT >= 26) {
-            getSystemService(NotificationManager::class.java).createNotificationChannel(
-                NotificationChannel(channel, getString(R.string.overlay_notification_channel), NotificationManager.IMPORTANCE_LOW),
-            )
-        }
+        if (Build.VERSION.SDK_INT >= 26) getSystemService(NotificationManager::class.java).createNotificationChannel(
+            NotificationChannel(channel, getString(R.string.overlay_notification_channel), NotificationManager.IMPORTANCE_LOW))
         val open = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
-        val notification = NotificationCompat.Builder(this, channel)
-            .setSmallIcon(R.drawable.ic_layers)
+        val notification = NotificationCompat.Builder(this, channel).setSmallIcon(R.drawable.ic_layers)
             .setContentTitle(getString(R.string.overlay_notification_title))
-            .setContentText(getString(R.string.overlay_notification_body))
-            .setContentIntent(open).setOngoing(true).setOnlyAlertOnce(true)
-            .setPriority(NotificationCompat.PRIORITY_LOW).build()
+            .setContentText(getString(R.string.overlay_notification_body)).setContentIntent(open)
+            .setOngoing(true).setOnlyAlertOnce(true).setPriority(NotificationCompat.PRIORITY_LOW).build()
         ServiceCompat.startForeground(this, 2003, notification,
             if (Build.VERSION.SDK_INT >= 34) ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE else 0)
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
-
     override fun onDestroy() {
-        Logger.d(TAG, "Service destroying")
         instance = null
-        // Cancel all coroutines
         serviceScope.cancel()
-        removeWindow()
+        sizeAnimator?.cancel()
+        clearInputFocus()
+        removeWindowInternal()
+        floatingView = null
+        layoutParams = null
         super.onDestroy()
-    }
-
-    // ==================== FloatingWindowController ====================
-
-    /**
-     * Hides the floating window from the screen.
-     *
-     * Clears input focus and hides the keyboard before removing the window.
-     *
-     */
-    override fun hide() {
-        serviceScope.launch {
-            Logger.d(TAG, "hide() called, isAttached=${isAttached.get()}")
-            if (isAttached.get()) {
-                // Clear focus and hide keyboard before hiding window
-                clearInputFocus()
-                removeWindowInternal()
-            }
-        }
     }
 
     override fun acquireHidden(): AutoCloseable = FloatingWindowStateManager.acquireHide(applicationContext)
     override fun acquirePauseVisibility(): AutoCloseable = FloatingWindowStateManager.acquirePauseVisibility(applicationContext)
-
-    /**
-     * Clears input focus and hides keyboard.
-     *
-     * After clearing focus, adds FLAG_NOT_FOCUSABLE so back key works in other apps.
-     */
-    private fun clearInputFocus() {
-        val taskInput = floatingView?.findViewById<EditText>(R.id.task_input)?.takeIf { it.hasFocus() }
-            ?: floatingView?.findViewById<EditText>(R.id.et_interaction_answer)?.takeIf { it.hasFocus() }
-            ?: return
-
-        Logger.d(TAG, "clearInputFocus: clearing focus and hiding keyboard")
-
-        // Hide keyboard first
-        val imm = getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager
-        imm.hideSoftInputFromWindow(taskInput.windowToken, 0)
-
-        // Clear focus
-        taskInput.clearFocus()
-
-        // Add FLAG_NOT_FOCUSABLE so back key works in other apps
-        layoutParams?.let { params ->
-            params.flags = params.flags or WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
-            if (isAttached.get()) {
-                try {
-                    windowManager?.updateViewLayout(floatingView, params)
-                    Logger.d(TAG, "clearInputFocus: added FLAG_NOT_FOCUSABLE")
-                } catch (e: Exception) {
-                    Logger.e(TAG, "Error updating layout after clearing focus", e)
-                }
-            }
+    override fun isVisible(): Boolean = isAttached.get()
+    override fun hide() {
+        serviceScope.launch {
+            sizeAnimator?.cancel()
+            sizeAnimator = null
+            clearInputFocus()
+            removeWindowInternal()
         }
     }
-
-    /**
-     * Shows the floating window on the screen.
-     *
-     * Creates the window view if not already created, then adds it to the window manager.
-     *
-     */
     override fun show() {
         serviceScope.launch {
             if (!FloatingWindowStateManager.shouldBeVisible()) return@launch
-            Logger.d(TAG, "show() called, isAttached=${isAttached.get()}, floatingView=${floatingView != null}")
-
-            // Create window view if not created yet
-            if (floatingView == null) {
-                createWindowView()
-            }
-
-            if (!isAttached.get() && floatingView != null) {
-                addWindowInternal()
-            }
+            if (floatingView == null) createWindowView()
+            if (!isAttached.get()) addWindowInternal()
+            render()
         }
     }
-
-    /**
-     * Shows the floating window and brings it to the front.
-     *
-     * If the window is already attached, removes and re-adds it to ensure it's on top.
-     *
-     */
     override fun showAndBringToFront() {
         serviceScope.launch {
             if (!FloatingWindowStateManager.shouldBeVisible()) return@launch
-            val attached = isAttached.get()
-            val hasView = floatingView != null
-            Logger.d(TAG, "showAndBringToFront() called, isAttached=$attached, floatingView=$hasView")
-
-            // Create window view if not created yet
-            if (floatingView == null) {
-                createWindowView()
-            }
-
-            if (floatingView != null) {
-                if (isAttached.get()) {
-                    removeWindowInternal()
-                }
-                addWindowInternal()
-            }
+            if (floatingView == null) createWindowView()
+            if (isAttached.get()) removeWindowInternal()
+            addWindowInternal()
+            render()
         }
     }
 
-    /**
-     * Checks if the floating window is currently visible.
-     *
-     * @return true if the window is attached and visible, false otherwise
-     *
-     */
-    override fun isVisible(): Boolean = isAttached.get()
+    private fun createWindowView() {
+        if (floatingView != null) return
+        val themed = android.view.ContextThemeWrapper(this, R.style.Theme_AutoGLM)
+        val view = LayoutInflater.from(themed).inflate(R.layout.layout_floating_window, null)
+        floatingView = view
+        layoutParams = createLayoutParams()
+        view.findViewById<RecyclerView>(R.id.steps_recycler_view).apply {
+            layoutManager = LinearLayoutManager(this@FloatingWindowService).apply { stackFromEnd = true }
+            adapter = chatAdapter
+            isNestedScrollingEnabled = false
+        }
+        chatAdapter.submitMessages(TaskExecutionManager.messages.value)
+        setupButtons(view)
+        setupInput(view.findViewById(R.id.task_input))
+        setupInput(view.findViewById(R.id.et_interaction_answer))
+        view.findViewById<EditText>(R.id.task_input).doAfterTextChanged { text ->
+            if (!rebindingDraft) {
+                drafts.save(draftConversationId, text?.toString().orEmpty(), emptyList())
+                if (text?.isNotBlank() == true) TaskExecutionManager.pauseForDraft()
+                else TaskExecutionManager.onEditorBlur(false)
+                render()
+            }
+        }
+        view.findViewById<EditText>(R.id.task_input).setOnFocusChangeListener { editor, focused ->
+            if (!focused) TaskExecutionManager.onEditorBlur((editor as EditText).text.isNotBlank())
+        }
+        view.findViewById<View>(R.id.capsule_body).addOnLayoutChangeListener { _, _, top, _, bottom, _, oldTop, _, oldBottom ->
+            if (bottom - top != oldBottom - oldTop) scheduleResize()
+        }
+        view.findViewById<EditText>(R.id.task_input).addOnLayoutChangeListener { _, _, top, _, bottom, _, oldTop, _, oldBottom ->
+            if (bottom - top != oldBottom - oldTop) scheduleResize()
+        }
+        view.findViewById<EditText>(R.id.et_interaction_answer).addOnLayoutChangeListener { _, _, top, _, bottom, _, oldTop, _, oldBottom ->
+            if (bottom - top != oldBottom - oldTop) scheduleResize()
+        }
+        view.setOnTouchListener { _, event ->
+            if (event.action == MotionEvent.ACTION_OUTSIDE) clearInputFocus()
+            false
+        }
+        setupDragBehavior(view.findViewById(R.id.header))
+        renderInteraction(TaskExecutionManager.pendingInteraction.value)
+        render()
+    }
 
-    /** Result text is presentation only; successful answers already appear as chat bubbles. */
-    private fun showResult(message: String, status: TaskStatus) {
-        floatingView?.findViewById<TextView>(R.id.tv_result)?.apply {
-            val failed = status == TaskStatus.FAILED
-            visibility = if (failed && message.isNotBlank()) View.VISIBLE else View.GONE
-            text = if (failed) message else ""
-            setTextColor(ContextCompat.getColor(this@FloatingWindowService, if (status == TaskStatus.COMPLETED) R.color.status_completed else R.color.status_failed))
+    private fun createLayoutParams(): WindowManager.LayoutParams {
+        val type = if (Build.VERSION.SDK_INT >= 26) WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+            else @Suppress("DEPRECATION") WindowManager.LayoutParams.TYPE_PHONE
+        return WindowManager.LayoutParams(cardWidth(), dp(56), type,
+            WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH or
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE, PixelFormat.TRANSLUCENT).apply {
+            gravity = Gravity.TOP or Gravity.START
+            x = (resources.displayMetrics.widthPixels - width) / 2
+            y = dp(12)
+            softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
         }
     }
 
-    /** UI owns only listeners and editor contents. The coordinator owns the pending operation. */
+    /** This method reads current facts on every call; no cached task state can win a race. */
+    private fun render() {
+        val view = floatingView ?: return
+        val state = TaskExecutionManager.taskState.value
+        rebindDraft(state.conversationId)
+        val minimized = FloatingWindowStateManager.snapshot.value.minimized
+        val input = view.findViewById<EditText>(R.id.task_input)
+        val presentation = CapsulePresentation.from(state.run, minimized, detailsExpanded, input.text.isNotBlank())
+        val switching = TaskExecutionManager.placementSwitching.value
+        val inBackground = TaskExecutionManager.executionMode.value == ExecutionMode.BACKGROUND
+        val statusText = when {
+            switching -> getString(R.string.capsule_switching)
+            state.status == TaskStatus.RUNNING && state.currentAction.isNotBlank() -> state.currentAction
+            else -> getString(when (state.status) {
+                TaskStatus.IDLE -> R.string.task_status_idle
+                TaskStatus.RUNNING -> R.string.task_status_running
+                TaskStatus.PAUSED -> R.string.task_status_paused
+                TaskStatus.CANCELLING -> R.string.task_status_cancelling
+                TaskStatus.COMPLETED -> R.string.task_status_completed
+                TaskStatus.FAILED -> R.string.task_status_failed
+                TaskStatus.WAITING_CONFIRMATION -> R.string.floating_waiting_confirm
+                TaskStatus.WAITING_TAKEOVER -> R.string.takeover_title
+                TaskStatus.WAITING_FOR_USER -> R.string.reply_hint
+            })
+        }
+        view.findViewById<TextView>(R.id.tv_status).apply {
+            text = statusText
+            contentDescription = if (inBackground && state.isExecuting) getString(R.string.capsule_foreground) + ": " + statusText
+                else getString(R.string.capsule_details) + ": " + statusText
+            visibility = if (minimized) View.GONE else View.VISIBLE
+        }
+        view.findViewById<View>(R.id.status_indicator).apply {
+            visibility = if (minimized) View.GONE else View.VISIBLE
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(ContextCompat.getColor(this@FloatingWindowService,
+                    if (state.status == TaskStatus.FAILED) R.color.capsule_danger else R.color.capsule_accent))
+            }
+        }
+        view.findViewById<ImageButton>(R.id.btn_minimize).contentDescription = getString(
+            if (minimized) R.string.capsule_ball else R.string.capsule_fold)
+        view.findViewById<ImageButton>(R.id.btn_progress_details).apply {
+            visibility = if (minimized) View.GONE else View.VISIBLE
+            contentDescription = getString(if (detailsExpanded) R.string.capsule_hide_progress else R.string.capsule_show_progress)
+            rotation = if (detailsExpanded) 180f else 0f
+        }
+        visible(view, R.id.control_buttons_container, !minimized && state.isExecuting)
+        visible(view, R.id.btn_pause, presentation.pauseVisible)
+        visible(view, R.id.btn_resume, presentation.resumeVisible)
+        visible(view, R.id.btn_stop, presentation.stopVisible)
+        view.findViewById<View>(R.id.btn_stop).isEnabled = state.status != TaskStatus.CANCELLING
+        state.run.activeWait?.let { shownWait ->
+            view.findViewById<View>(R.id.btn_finish_wait).setOnClickListener {
+                val current = TaskExecutionManager.activeWait.value
+                if (current?.runId == shownWait.runId && current.id == shownWait.id) TaskExecutionManager.finishWaiting()
+            }
+        }
+        setBodyExpanded(view, presentation.bodyVisible)
+        // Preserve the outgoing body's content while its surface shrinks; all commands still
+        // validate current interaction/run IDs if tapped during the short outgoing fade.
+        if (presentation.bodyVisible) {
+            visible(view, R.id.input_area, presentation.inputVisible)
+            visible(view, R.id.interaction_panel, presentation.interactionVisible)
+            visible(view, R.id.btn_finish_wait, presentation.waitVisible)
+            visible(view, R.id.steps_recycler_view, presentation.messagesVisible && chatAdapter.itemCount > 0)
+            visible(view, R.id.btn_new_task, presentation.newConversationVisible)
+            visible(view, R.id.btn_select_template, presentation.inputVisible)
+            val description = CapsulePresentation.standaloneDescription(state.currentAction,
+                TaskExecutionManager.messages.value.asSequence()
+                    .filter { it.role == com.kevinluo.autoglm.history.HistoryMessageRole.AGENT }.map { it.text })
+            view.findViewById<TextView>(R.id.capsule_current_description).text = description.orEmpty()
+            visible(view, R.id.capsule_current_description, detailsExpanded && description != null)
+        }
+        input.setHint(when (state.status) {
+            TaskStatus.PAUSED -> R.string.capsule_pause_hint
+            TaskStatus.COMPLETED, TaskStatus.FAILED -> R.string.continue_conversation_hint
+            else -> R.string.task_input_hint
+        })
+        view.findViewById<View>(R.id.btn_start).isEnabled = state.status != TaskStatus.CANCELLING && !switching
+        view.findViewById<TextView>(R.id.tv_step_counter).text = getString(
+            if (inBackground) R.string.capsule_mode_back else R.string.capsule_mode_front) +
+            if (state.stepNumber > 0) " · " + getString(R.string.step_counter_format, state.stepNumber) else ""
+        view.findViewById<MaterialButton>(R.id.btn_execution_mode).apply {
+            setText(if (switching) R.string.capsule_switching else if (inBackground) R.string.capsule_foreground else R.string.capsule_background)
+            isEnabled = !switching && state.status != TaskStatus.CANCELLING
+            visibility = if (state.isExecuting) View.VISIBLE else View.GONE
+        }
+        val error = TaskExecutionManager.placementError.value
+        view.findViewById<TextView>(R.id.capsule_error).apply {
+            text = error.orEmpty()
+            visibility = if (!error.isNullOrBlank()) View.VISIBLE else View.GONE
+        }
+        view.findViewById<TextView>(R.id.tv_result).apply {
+            text = state.resultMessage
+            visibility = if (state.status == TaskStatus.FAILED && text.isNotBlank()) View.VISIBLE else View.GONE
+        }
+        view.findViewById<TextView>(R.id.token_usage).text = getString(R.string.overlay_token_usage,
+            formatTokenCount(state.totalInputTokens), formatTokenCount(state.totalOutputTokens))
+        if (!presentation.bodyVisible) clearInputFocus()
+        scheduleResize()
+    }
+
+    private fun rebindDraft(conversationId: String?) {
+        if (draftBound && draftConversationId == conversationId) return
+        cancelKeyboardRequest()
+        val input = floatingView?.findViewById<EditText>(R.id.task_input) ?: return
+        if (draftBound) drafts.save(draftConversationId, input.text.toString(), emptyList())
+        draftConversationId = conversationId
+        draftBound = true
+        rebindingDraft = true
+        try { input.setText(drafts.get(conversationId).text) } finally { rebindingDraft = false }
+    }
+
     private fun renderInteraction(pending: PendingInteraction?) {
         val view = floatingView ?: return
-        val panel = view.findViewById<View>(R.id.interaction_panel)
         if (pending == null) {
             if (lastInteractionKey != null) clearInputFocus()
             lastInteractionKey = null
-            panel.visibility = View.GONE
             return
         }
         val key = pending.runId to pending.id
-        if (lastInteractionKey == key) {
-            panel.visibility = if (FloatingWindowStateManager.snapshot.value.minimized) View.GONE else View.VISIBLE
-            return
-        }
+        if (lastInteractionKey == key) return
+        clearInputFocus()
         lastInteractionKey = key
         FloatingWindowStateManager.setMinimized(false)
         view.findViewById<TextView>(R.id.tv_interaction_message).text = pending.prompt
@@ -412,616 +401,314 @@ class FloatingWindowService :
                 if (text.isBlank()) return@setOnClickListener
                 InteractionReply.Text(text)
             } else InteractionReply.Accepted(true)
-            TaskExecutionManager.replyInteraction(pending.runId, pending.id, reply)
+            if (TaskExecutionManager.replyInteraction(pending.runId, pending.id, reply)) clearInputFocus()
         }
-        view.findViewById<MaterialButton>(R.id.btn_interaction_cancel).setOnClickListener {
+        view.findViewById<View>(R.id.btn_interaction_cancel).setOnClickListener {
             TaskExecutionManager.replyInteraction(pending.runId, pending.id, InteractionReply.Cancelled)
         }
         pending.options.forEachIndexed { index, option ->
-            // Match the theme used to inflate the overlay; Service context lacks it.
             options.addView(MaterialButton(options.context).apply {
                 text = option
-                textSize = 13f
-                setOnClickListener {
-                    TaskExecutionManager.replyInteraction(pending.runId, pending.id, InteractionReply.Choice(index))
-                }
+                textSize = 14f
+                minHeight = dp(48)
+                setTextColor(ContextCompat.getColor(context, R.color.capsule_accent))
+                backgroundTintList = ContextCompat.getColorStateList(context, R.color.capsule_accent_soft)
+                cornerRadius = dp(16)
+                setOnClickListener { TaskExecutionManager.replyInteraction(pending.runId, pending.id, InteractionReply.Choice(index)) }
             })
         }
-        panel.visibility = View.VISIBLE
-        if (pending.kind == InteractionKind.TEXT) {
-            answer.requestFocus()
-            layoutParams?.let { params ->
-                params.flags = params.flags and WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE.inv()
-                if (isAttached.get()) windowManager?.updateViewLayout(floatingView, params)
-            }
-            answer.post {
-                val current = TaskExecutionManager.pendingInteraction.value
-                if (current?.runId == pending.runId && current.id == pending.id && answer.isAttachedToWindow) {
-                    (getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager).showSoftInput(answer, InputMethodManager.SHOW_IMPLICIT)
-                }
-            }
-        }
-    }
-    // ==================== Private Methods ====================
-
-    /**
-     * Updates the UI elements based on the current task status.
-     *
-     * @param status The current task status
-     */
-    private fun updateUIForStatus(status: TaskStatus) {
-        Logger.d(TAG, "updateUIForStatus called with status: $status")
-        floatingView?.let { view ->
-            val inputArea = view.findViewById<LinearLayout>(R.id.input_area)
-            val stepsRecycler = view.findViewById<RecyclerView>(R.id.steps_recycler_view)
-            val controlButtonsContainer = view.findViewById<LinearLayout>(R.id.control_buttons_container)
-            val stopBtn = view.findViewById<MaterialButton>(R.id.btn_stop)
-            val pauseBtn = view.findViewById<MaterialButton>(R.id.btn_pause)
-            val resumeBtn = view.findViewById<MaterialButton>(R.id.btn_resume)
-            val newTaskBtn = view.findViewById<MaterialButton>(R.id.btn_new_task)
-
-            Logger.d(TAG, "updateUIForStatus: inputArea=$inputArea, stepsRecycler=$stepsRecycler, stopBtn=$stopBtn")
-
-            when (status) {
-                TaskStatus.CANCELLING -> {
-                    inputArea?.visibility = View.VISIBLE
-                    stepsRecycler?.visibility = View.VISIBLE
-                    controlButtonsContainer?.visibility = View.VISIBLE
-                    pauseBtn?.visibility = View.GONE
-                    resumeBtn?.visibility = View.GONE
-                    stopBtn?.visibility = View.VISIBLE
-                    stopBtn?.isEnabled = false
-                    newTaskBtn?.visibility = View.GONE
-                    view.findViewById<MaterialButton>(R.id.btn_start)?.isEnabled = false
-                }
-                TaskStatus.IDLE -> {
-                    // Show input area, hide steps and control buttons
-                    Logger.d(TAG, "updateUIForStatus: Setting IDLE state - show input, hide steps")
-                    inputArea?.visibility = View.VISIBLE
-                    stepsRecycler?.visibility = if (chatAdapter.itemCount > 0) View.VISIBLE else View.GONE
-                    controlButtonsContainer?.visibility = View.GONE
-                    newTaskBtn?.visibility = View.GONE
-                    view.findViewById<EditText>(R.id.task_input)?.setHint(R.string.task_input_hint)
-                    view.findViewById<MaterialButton>(R.id.btn_start)?.setText(R.string.send_message)
-                }
-
-                TaskStatus.RUNNING, TaskStatus.WAITING_CONFIRMATION, TaskStatus.WAITING_TAKEOVER, TaskStatus.WAITING_FOR_USER -> {
-                    inputArea?.visibility = View.VISIBLE
-                    stepsRecycler?.visibility = View.VISIBLE
-                    controlButtonsContainer?.visibility = View.VISIBLE
-                    pauseBtn?.visibility = View.VISIBLE
-                    resumeBtn?.visibility = View.GONE
-                    stopBtn?.visibility = View.VISIBLE
-                    newTaskBtn?.visibility = View.GONE
-                    view.findViewById<EditText>(R.id.task_input)?.setHint(R.string.running_message_hint)
-                    view.findViewById<MaterialButton>(R.id.btn_start)?.setText(R.string.send_message)
-                }
-
-                TaskStatus.PAUSED -> {
-                    inputArea?.visibility = View.VISIBLE
-                    stepsRecycler?.visibility = View.VISIBLE
-                    controlButtonsContainer?.visibility = View.VISIBLE
-                    pauseBtn?.visibility = View.GONE
-                    resumeBtn?.visibility = View.VISIBLE
-                    stopBtn?.visibility = View.VISIBLE
-                    newTaskBtn?.visibility = View.GONE
-                    view.findViewById<EditText>(R.id.task_input)?.setHint(R.string.running_message_hint)
-                    view.findViewById<MaterialButton>(R.id.btn_start)?.setText(R.string.send_message)
-                }
-
-                TaskStatus.COMPLETED, TaskStatus.FAILED -> {
-                    // Keep conversation input available and offer a separate new-session action.
-                    inputArea?.visibility = View.VISIBLE
-                    stepsRecycler?.visibility = View.VISIBLE
-                    controlButtonsContainer?.visibility = View.GONE
-                    newTaskBtn?.visibility = View.VISIBLE
-                    newTaskBtn?.setText(R.string.new_conversation)
-                    view.findViewById<EditText>(R.id.task_input)?.setHint(R.string.continue_conversation_hint)
-                    view.findViewById<MaterialButton>(R.id.btn_start)?.setText(R.string.send_message)
-                }
-            }
-            val inputVis = inputArea?.visibility
-            val stepsVis = stepsRecycler?.visibility
-            Logger.d(TAG, "updateUIForStatus: After update - inputArea.vis=$inputVis, stepsRecycler.vis=$stepsVis")
-        } ?: Logger.w(TAG, "updateUIForStatus: floatingView is null!")
+        // Revealing a question is not permission to steal the main display's keyboard focus.
     }
 
-    /**
-     * Creates and shows the floating window.
-     */
-    /**
-     * Creates the window view without showing it.
-     */
-    private fun createWindowView() {
-        if (floatingView != null) {
-            Logger.d(TAG, "Window view already created")
-            return
+    private fun setupButtons(view: View) {
+        view.findViewById<View>(R.id.btn_open_app).setOnClickListener {
+            startActivity(Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP))
         }
-
-        Logger.d(TAG, "Creating floating window view")
-
-        val themedContext = android.view.ContextThemeWrapper(this, R.style.Theme_AutoGLM)
-        floatingView =
-            LayoutInflater.from(themedContext).inflate(R.layout.layout_floating_window, null)
-
-        layoutParams = createLayoutParams()
-
-        setupRecyclerView()
-        setupDragBehavior()
-        setupButtons()
-        setupTaskInput()
-
-        // Render the latest read-only projection when this platform view is recreated.
-        val currentState = TaskExecutionManager.taskState.value
-        updateUIForStatus(currentState.status)
-        updateStatusIndicator(currentState.status)
-        updateUIFromTaskState(currentState)
-        renderInteraction(TaskExecutionManager.pendingInteraction.value)
-        if (currentState.stepNumber > 0) {
-            floatingView?.findViewById<TextView>(R.id.tv_step_counter)?.text =
-                getString(R.string.step_counter_format, currentState.stepNumber)
+        view.findViewById<View>(R.id.btn_minimize).apply {
+            setOnClickListener { FloatingWindowStateManager.setMinimized(!FloatingWindowStateManager.snapshot.value.minimized) }
+            setOnLongClickListener { TaskExecutionManager.cancelTask(); true }
         }
-
-        // Setup touch listener to clear focus when tapping outside input
-        setupTouchToClearFocus()
-
-        Logger.d(TAG, "Floating window view created")
-    }
-
-    /**
-     * Sets up touch listener on the floating view to clear input focus
-     * when user taps outside the input field or outside the window.
-     */
-    private fun setupTouchToClearFocus() {
-        floatingView?.setOnTouchListener { _, event ->
-            if (event.action == MotionEvent.ACTION_DOWN || event.action == MotionEvent.ACTION_OUTSIDE) {
-                val taskInput = floatingView?.findViewById<EditText>(R.id.task_input)
-                if (taskInput?.hasFocus() == true) {
-                    if (event.action == MotionEvent.ACTION_OUTSIDE) {
-                        // Touch outside window, clear focus
-                        Logger.d(TAG, "Touch outside window, clearing focus")
-                        clearInputFocus()
-                    } else {
-                        // Check if touch is outside the input field
-                        val inputLocation = IntArray(2)
-                        taskInput.getLocationOnScreen(inputLocation)
-                        val inputRect =
-                            android.graphics.Rect(
-                                inputLocation[0],
-                                inputLocation[1],
-                                inputLocation[0] + taskInput.width,
-                                inputLocation[1] + taskInput.height,
-                            )
-
-                        // Get touch position relative to screen
-                        val touchX = event.rawX.toInt()
-                        val touchY = event.rawY.toInt()
-
-                        if (!inputRect.contains(touchX, touchY)) {
-                            // Touch is outside input, clear focus
-                            Logger.d(TAG, "Touch outside input, clearing focus")
-                            clearInputFocus()
-                        }
-                    }
-                }
-            }
-            false // Don't consume the event, let it propagate
-        }
-    }
-
-    /**
-     * Creates the window layout parameters.
-     *
-     * @return WindowManager.LayoutParams configured for the floating window
-     */
-    private fun createLayoutParams(): WindowManager.LayoutParams {
-        val type =
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-            } else {
-                @Suppress("DEPRECATION")
-                WindowManager.LayoutParams.TYPE_PHONE
-            }
-
-        val displayMetrics = resources.displayMetrics
-        val screenWidth = displayMetrics.widthPixels
-        val screenHeight = displayMetrics.heightPixels
-
-        val widthPx = (screenWidth * WIDTH_PERCENT).toInt()
-        val heightPx = (screenHeight * HEIGHT_PERCENT).toInt()
-
-        return WindowManager
-            .LayoutParams(
-                widthPx,
-                heightPx,
-                type,
-                // FLAG_NOT_TOUCH_MODAL: allow touches outside window to pass through
-                // FLAG_WATCH_OUTSIDE_TOUCH: receive ACTION_OUTSIDE events to clear focus
-                // FLAG_NOT_FOCUSABLE: initially not focusable so back key works in other apps
-                // When user clicks input, FLAG_NOT_FOCUSABLE will be removed to allow keyboard
-                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
-                    WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH or
-                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
-                PixelFormat.TRANSLUCENT,
-            ).apply {
-                gravity = Gravity.TOP or Gravity.START
-                x = 0
-                y = 0
-                // Allow keyboard input
-                softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
-            }
-    }
-
-    /**
-     * Sets up the RecyclerView for displaying steps.
-     */
-    private fun setupRecyclerView() {
-        val recyclerView = floatingView?.findViewById<RecyclerView>(R.id.steps_recycler_view)
-        recyclerView?.let { rv ->
-            rv.layoutManager = LinearLayoutManager(this).apply { stackFromEnd = true }
-            rv.adapter = chatAdapter
-            chatAdapter.submitMessages(TaskExecutionManager.messages.value)
-        }
-    }
-
-    /**
-     * Sets up the task input field and start button.
-     */
-    private fun setupTaskInput() {
-        val taskInput = floatingView?.findViewById<EditText>(R.id.task_input)
-        val startBtn = floatingView?.findViewById<MaterialButton>(R.id.btn_start)
-        val selectTemplateBtn = floatingView?.findViewById<ImageButton>(R.id.btn_select_template)
-
-        // Use OnTouchListener to handle focus BEFORE the click event
-        // This ensures FLAG_NOT_FOCUSABLE is removed before system tries to show keyboard
-        taskInput?.setOnTouchListener { _, event ->
-            if (event.action == MotionEvent.ACTION_DOWN) {
-                Logger.d(TAG, "taskInput touched (ACTION_DOWN)")
-                layoutParams?.let { params ->
-                    val wasNotFocusable = (params.flags and WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE) != 0
-                    if (wasNotFocusable) {
-                        // Remove FLAG_NOT_FOCUSABLE to allow focus BEFORE the touch is processed
-                        params.flags = params.flags and WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE.inv()
-                        if (isAttached.get()) {
-                            try {
-                                windowManager?.updateViewLayout(floatingView, params)
-                                Logger.d(TAG, "setupTaskInput: removed FLAG_NOT_FOCUSABLE on touch")
-
-                                // Use ViewTreeObserver to wait for window focus, then show keyboard
-                                floatingView?.viewTreeObserver?.addOnWindowFocusChangeListener(
-                                    object : android.view.ViewTreeObserver.OnWindowFocusChangeListener {
-                                        override fun onWindowFocusChanged(hasFocus: Boolean) {
-                                            Logger.d(TAG, "Window focus changed: hasFocus=$hasFocus")
-                                            if (hasFocus) {
-                                                floatingView?.viewTreeObserver?.removeOnWindowFocusChangeListener(this)
-                                                taskInput.requestFocus()
-                                                val imm = getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager
-                                                imm.showSoftInput(taskInput, InputMethodManager.SHOW_IMPLICIT)
-                                            }
-                                        }
-                                    },
-                                )
-                            } catch (e: Exception) {
-                                Logger.e(TAG, "Error updating layout for focus", e)
-                            }
-                        }
-                    }
-                }
-            }
-            false // Don't consume the event, let it propagate for normal EditText behavior
-        }
-
-        taskInput?.doAfterTextChanged { text ->
-            if (text?.isNotBlank() == true) TaskExecutionManager.pauseForDraft()
-            else TaskExecutionManager.onEditorBlur(false)
-        }
-        taskInput?.setOnFocusChangeListener { _, hasFocus ->
-            if (!hasFocus) TaskExecutionManager.onEditorBlur(taskInput.text?.isNotBlank() == true)
-        }
-
-        // Template selection button
-        selectTemplateBtn?.setOnClickListener {
-            showTemplateSelectionPopup(it, taskInput)
-        }
-
-        startBtn?.setOnClickListener {
-            val task = taskInput?.text?.toString()?.trim() ?: ""
-            if (task.isNotBlank()) {
-                if (TaskExecutionManager.isTaskRunning()) {
-                    if (TaskExecutionManager.sendMessage(task)) taskInput?.text?.clear()
-                    return@setOnClickListener
-                }
-                // Check if we can start a task and get specific reason if not
-                val blockReason = TaskExecutionManager.getStartTaskBlockReason()
-                if (blockReason != TaskExecutionManager.StartTaskBlockReason.NONE) {
-                    Logger.w(TAG, "Cannot start task: $blockReason")
-                    val messageRes =
-                        when (blockReason) {
-                            TaskExecutionManager.StartTaskBlockReason.SERVICE_NOT_CONNECTED -> {
-                                R.string.toast_shizuku_not_running
-                            }
-
-                            TaskExecutionManager.StartTaskBlockReason.PHONE_AGENT_NULL -> {
-                                R.string.toast_phone_agent_not_ready
-                            }
-
-                            TaskExecutionManager.StartTaskBlockReason.TASK_ALREADY_RUNNING -> {
-                                R.string.toast_task_already_running
-                            }
-
-                            TaskExecutionManager.StartTaskBlockReason.NONE -> {
-                                R.string.toast_shizuku_not_running
-                            } // Should not happen
-                        }
-                    Toast.makeText(this, messageRes, Toast.LENGTH_SHORT).show()
-                    return@setOnClickListener
-                }
-
-                if (TaskExecutionManager.sendMessage(task)) {
-                    taskInput?.text?.clear()
-                    clearInputFocus()
-                }
+        view.findViewById<View>(R.id.btn_close).setOnClickListener { FloatingWindowStateManager.close(this) }
+        view.findViewById<View>(R.id.btn_stop).setOnClickListener { TaskExecutionManager.cancelTask() }
+        view.findViewById<View>(R.id.btn_pause).setOnClickListener { TaskExecutionManager.pauseTask() }
+        view.findViewById<View>(R.id.btn_resume).setOnClickListener { TaskExecutionManager.resumeTask() }
+        view.findViewById<View>(R.id.btn_new_task).setOnClickListener {
+            if (!TaskExecutionManager.isTaskRunning()) {
+                TaskExecutionManager.resetTask()
+                drafts.clear(draftConversationId)
+                view.findViewById<EditText>(R.id.task_input).text.clear()
+                detailsExpanded = false
+                render()
             }
         }
-    }
-
-    /**
-     * Shows a popup menu for template selection.
-     *
-     * @param anchor The view to anchor the popup to
-     * @param taskInput The EditText to populate with the selected template
-     */
-    private fun showTemplateSelectionPopup(anchor: View, taskInput: EditText?) {
-        val settingsManager =
-            com.kevinluo.autoglm.settings
-                .SettingsManager.getInstance(this)
-        val templates = settingsManager.getTaskTemplates()
-
-        if (templates.isEmpty()) {
-            android.widget.Toast
-                .makeText(
-                    this,
-                    R.string.settings_no_templates,
-                    android.widget.Toast.LENGTH_SHORT,
-                ).show()
-            return
+        view.findViewById<View>(R.id.btn_execution_mode).setOnClickListener { switchMode() }
+        view.findViewById<View>(R.id.btn_progress_details).setOnClickListener {
+            detailsExpanded = !detailsExpanded
+            render()
         }
-
-        val popup = android.widget.PopupMenu(this, anchor)
-        templates.forEachIndexed { index, template ->
-            popup.menu.add(0, index, index, template.name)
+        view.findViewById<View>(R.id.tv_status).setOnClickListener {
+            if (TaskExecutionManager.executionMode.value == ExecutionMode.BACKGROUND && TaskExecutionManager.isTaskRunning()) {
+                requestMode(ExecutionMode.FOREGROUND)
+            } else { detailsExpanded = !detailsExpanded; render() }
         }
-
-        popup.setOnMenuItemClickListener { item ->
-            val selectedTemplate = templates[item.itemId]
-            taskInput?.setText(selectedTemplate.description)
-            true
-        }
-
-        popup.show()
-    }
-
-    /**
-     * Adds the floating window to the window manager.
-     */
-    private fun addWindowInternal() {
-        if (isAttached.get() || floatingView == null || layoutParams == null) {
-            val attached = isAttached.get()
-            val hasView = floatingView != null
-            val hasParams = layoutParams != null
-            Logger.w(TAG, "Cannot add window: isAttached=$attached, view=$hasView, params=$hasParams")
-            return
-        }
-
-        try {
-            Logger.d(TAG, "Adding window with params: x=${layoutParams?.x}, y=${layoutParams?.y}")
-            windowManager?.addView(floatingView, layoutParams)
-            isAttached.set(true)
-            Logger.d(TAG, "Window added successfully")
-        } catch (e: Exception) {
-            Logger.e(TAG, "Failed to add window", e)
+        view.findViewById<View>(R.id.btn_select_template).setOnClickListener { showTemplateSelection(it) }
+        view.findViewById<View>(R.id.btn_start).setOnClickListener {
+            val editor = view.findViewById<EditText>(R.id.task_input)
+            val text = editor.text.toString().trim()
+            if (text.isBlank()) return@setOnClickListener
+            val accepted = if (TaskExecutionManager.isTaskRunning()) TaskExecutionManager.sendAndResume(text)
+                else TaskExecutionManager.sendMessage(text)
+            if (accepted) {
+                drafts.clear(draftConversationId)
+                editor.text.clear()
+                clearInputFocus()
+                detailsExpanded = false
+                render()
+            } else Toast.makeText(this, R.string.capsule_send_failed, Toast.LENGTH_SHORT).show()
         }
     }
 
-    /**
-     * Removes the floating window from the window manager.
-     */
-    private fun removeWindowInternal() {
-        if (!isAttached.get() || floatingView == null) {
-            Logger.w(TAG, "Cannot remove window: isAttached=${isAttached.get()}, view=${floatingView != null}")
-            return
-        }
+    private fun switchMode() = requestMode(if (TaskExecutionManager.executionMode.value == ExecutionMode.BACKGROUND)
+        ExecutionMode.FOREGROUND else ExecutionMode.BACKGROUND)
+    private fun requestMode(mode: ExecutionMode) {
+        clearInputFocus()
+        if (!TaskExecutionManager.requestExecutionMode(mode)) Toast.makeText(this, R.string.capsule_mode_rejected, Toast.LENGTH_SHORT).show()
+    }
 
-        try {
-            windowManager?.removeView(floatingView)
-            isAttached.set(false)
-            Logger.d(TAG, "Window removed successfully")
-        } catch (e: Exception) {
-            Logger.e(TAG, "Failed to remove window", e)
+    private fun showTemplateSelection(anchor: View) {
+        val templates = com.kevinluo.autoglm.settings.SettingsManager.getInstance(this).getTaskTemplates()
+        if (templates.isEmpty()) { Toast.makeText(this, R.string.settings_no_templates, Toast.LENGTH_SHORT).show(); return }
+        android.widget.PopupMenu(anchor.context, anchor).apply {
+            templates.forEachIndexed { index, template -> menu.add(0, index, index, template.name) }
+            setOnMenuItemClickListener { item -> floatingView?.findViewById<EditText>(R.id.task_input)?.setText(templates[item.itemId].description); true }
+            show()
         }
     }
 
-    /**
-     * Removes the window and cleans up resources.
-     */
-    private fun removeWindow() {
-        if (isAttached.get() && floatingView != null) {
-            try {
-                windowManager?.removeView(floatingView)
-            } catch (e: Exception) {
-                Logger.e(TAG, "Error removing window", e)
-            }
+    private fun setupInput(input: AutoGrowingInput) {
+        input.onDismissKeyboard = ::clearInputFocus
+        input.setOnTouchListener { _, event ->
+            if (event.action == MotionEvent.ACTION_DOWN) requestKeyboard(input)
+            false
         }
-        floatingView = null
-        layoutParams = null
-        isAttached.set(false)
     }
 
-    /**
-     * Sets up drag behavior for the floating window header.
-     */
-    private fun setupDragBehavior() {
-        val header = floatingView?.findViewById<View>(R.id.header) ?: return
+    /** Register before relayout: posting after updateViewLayout alone does not acknowledge window focus. */
+    private fun requestKeyboard(input: AutoGrowingInput) {
+        cancelKeyboardRequest()
+        val root = floatingView ?: return
         val params = layoutParams ?: return
+        if (!isAttached.get() || !input.isShown || !FloatingWindowStateManager.shouldBeVisible()) return
+        val generation = keyboardRequestGeneration
+        val state = TaskExecutionManager.taskState.value
+        val runId = state.runId
+        val conversationId = state.conversationId
+        val interactionKey = TaskExecutionManager.pendingInteraction.value?.let { it.runId to it.id }
+        val observer = root.viewTreeObserver
+        var scheduled = false
+        var postedShow: Runnable? = null
 
+        fun current(): Boolean {
+            if (generation != keyboardRequestGeneration || floatingView !== root || !isAttached.get() ||
+                !root.isAttachedToWindow || !input.isShown || !bodyExpanded || !FloatingWindowStateManager.shouldBeVisible()) return false
+            val current = TaskExecutionManager.taskState.value
+            if (current.runId != runId || current.conversationId != conversationId) return false
+            val pending = TaskExecutionManager.pendingInteraction.value
+            return when (input.id) {
+                R.id.et_interaction_answer -> pending?.kind == InteractionKind.TEXT &&
+                    interactionKey == (pending.runId to pending.id)
+                R.id.task_input -> pending == null && CapsulePresentation.from(current.run,
+                    FloatingWindowStateManager.snapshot.value.minimized, detailsExpanded, input.text?.isNotBlank() == true).inputVisible
+                else -> false
+            }
+        }
+
+        fun focusReady() {
+            if (!current()) { cancelKeyboardRequest(); return }
+            if (scheduled || !root.hasWindowFocus()) return
+            if (!input.requestFocus()) { cancelKeyboardRequest(); return }
+            scheduled = true
+            // This post follows actual window focus and editor focus, allowing InputMethodManager's
+            // focus transaction to complete. It is not a timer or a retry of a failed show request.
+            postedShow = Runnable {
+                if (current() && root.hasWindowFocus() && input.hasFocus()) {
+                    (getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager)
+                        .showSoftInput(input, InputMethodManager.SHOW_IMPLICIT)
+                }
+                if (generation == keyboardRequestGeneration) cancelKeyboardRequest()
+            }.also { root.post(it) }
+        }
+
+        val focusListener = ViewTreeObserver.OnWindowFocusChangeListener { hasFocus -> if (hasFocus) focusReady() }
+        val detachListener = object : View.OnAttachStateChangeListener {
+            override fun onViewAttachedToWindow(view: View) = Unit
+            override fun onViewDetachedFromWindow(view: View) {
+                if (generation == keyboardRequestGeneration) cancelKeyboardRequest()
+            }
+        }
+        keyboardRequestCleanup = {
+            if (observer.isAlive) observer.removeOnWindowFocusChangeListener(focusListener)
+            root.removeOnAttachStateChangeListener(detachListener)
+            postedShow?.let(root::removeCallbacks)
+        }
+        observer.addOnWindowFocusChangeListener(focusListener)
+        root.addOnAttachStateChangeListener(detachListener)
+        params.flags = params.flags and WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE.inv()
+        updateWindow()
+        focusReady() // Already-focused overlays need no new focus event.
+    }
+
+    private fun cancelKeyboardRequest() {
+        keyboardRequestGeneration++
+        val cleanup = keyboardRequestCleanup
+        keyboardRequestCleanup = null
+        cleanup?.invoke()
+    }
+
+    private fun clearInputFocus() {
+        cancelKeyboardRequest()
+        val view = floatingView ?: return
+        val input = view.findViewById<EditText>(R.id.task_input).takeIf { it.hasFocus() }
+            ?: view.findViewById<EditText>(R.id.et_interaction_answer).takeIf { it.hasFocus() }
+        if (input != null) {
+            (getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager).hideSoftInputFromWindow(input.windowToken, 0)
+            input.clearFocus()
+        }
+        layoutParams?.let { params ->
+            val flags = params.flags or WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+            if (flags != params.flags) { params.flags = flags; updateWindow() }
+        }
+    }
+
+    internal fun applyMinimizedPresentation(minimized: Boolean) { render() }
+
+    private fun scheduleResize() {
+        val view = floatingView ?: return
+        if (layoutPosted) return
+        layoutPosted = true
+        view.post {
+            layoutPosted = false
+            if (floatingView === view) resizeToContent(view)
+        }
+    }
+
+    private fun setBodyExpanded(view: View, expanded: Boolean) {
+        if (bodyExpanded == expanded) return
+        bodyExpanded = expanded
+        val generation = ++bodyFadeGeneration
+        val body = view.findViewById<View>(R.id.capsule_body)
+        body.animate().cancel()
+        val animate = isAttached.get() && (Build.VERSION.SDK_INT < 26 || ValueAnimator.areAnimatorsEnabled())
+        if (expanded) {
+            body.visibility = View.VISIBLE
+            body.alpha = if (animate) 0f else 1f
+            body.translationY = if (animate) dp(5).toFloat() else 0f
+            if (animate) body.animate().alpha(1f).translationY(0f).setStartDelay(60).setDuration(180).start()
+        } else if (animate) {
+            body.animate().alpha(0f).translationY(dp(4).toFloat()).setStartDelay(0).setDuration(110).withEndAction {
+                if (floatingView === view && bodyFadeGeneration == generation && !bodyExpanded) body.visibility = View.GONE
+            }.start()
+        } else { body.visibility = View.GONE; body.alpha = 1f; body.translationY = 0f }
+    }
+
+    /** Animate the existing window; stale animators cannot attach or resurrect a window. */
+    private fun resizeToContent(view: View) {
+        val params = layoutParams ?: return
+        val minimized = FloatingWindowStateManager.snapshot.value.minimized
+        val width = if (minimized) dp(56) else cardWidth()
+        val header = view.findViewById<View>(R.id.header)
+        header.measure(View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY),
+            View.MeasureSpec.makeMeasureSpec(dp(88), View.MeasureSpec.AT_MOST))
+        val headerHeight = if (minimized) dp(56) else header.measuredHeight.coerceIn(dp(56), dp(88))
+        if (header.layoutParams.height != headerHeight) {
+            header.layoutParams = header.layoutParams.apply { height = headerHeight }
+        }
+        val body = view.findViewById<View>(R.id.capsule_body)
+        val visibleFrame = Rect().also(view::getWindowVisibleDisplayFrame)
+        val maxHeight = minOf((resources.displayMetrics.heightPixels * .76f).toInt(),
+            (visibleFrame.bottom - params.y - dp(12)).takeIf { it > dp(100) } ?: resources.displayMetrics.heightPixels)
+        val height = if (minimized || !bodyExpanded) headerHeight else {
+            body.measure(View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY),
+                View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED))
+            (headerHeight + body.measuredHeight).coerceAtMost(maxHeight.coerceAtLeast(headerHeight + dp(48)))
+        }
+        if (targetWidth == width && targetHeight == height && (sizeAnimator?.isRunning == true ||
+                    (params.width == width && params.height == height))) return
+        targetWidth = width
+        targetHeight = height
+        sizeAnimator?.cancel()
+        val animate = isAttached.get() && FloatingWindowStateManager.shouldBeVisible() &&
+            (Build.VERSION.SDK_INT < 26 || ValueAnimator.areAnimatorsEnabled())
+        if (!animate) { params.width = width; params.height = height; updateWindow(); return }
+        val fromWidth = params.width
+        val fromHeight = params.height
+        sizeAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
+            duration = if (abs(height - fromHeight) < dp(50) && width == fromWidth) 150L else 300L
+            interpolator = PathInterpolator(.2f, 0f, 0f, 1f)
+            addUpdateListener { animator ->
+                if (floatingView !== view || !isAttached.get() || !FloatingWindowStateManager.shouldBeVisible()) return@addUpdateListener
+                val fraction = animator.animatedValue as Float
+                params.width = (fromWidth + (width - fromWidth) * fraction).roundToInt()
+                params.height = (fromHeight + (height - fromHeight) * fraction).roundToInt()
+                updateWindow()
+            }
+            start()
+        }
+    }
+
+    private fun setupDragBehavior(header: CapsuleDragLayout) {
         var initialX = 0
         var initialY = 0
-        var initialTouchX = 0f
-        var initialTouchY = 0f
-
-        header.setOnTouchListener { _, event ->
-            when (event.action) {
-                MotionEvent.ACTION_DOWN -> {
-                    initialX = params.x
-                    initialY = params.y
-                    initialTouchX = event.rawX
-                    initialTouchY = event.rawY
-                    true
-                }
-
-                MotionEvent.ACTION_MOVE -> {
-                    if (isAttached.get()) {
-                        params.x = initialX + (event.rawX - initialTouchX).toInt()
-                        params.y = initialY + (event.rawY - initialTouchY).toInt()
-                        try {
-                            windowManager?.updateViewLayout(floatingView, params)
-                        } catch (e: Exception) {
-                            Logger.e(TAG, "Error updating layout", e)
-                        }
-                    }
-                    true
-                }
-
-                else -> {
-                    false
-                }
+        header.onDragStart = { layoutParams?.let { initialX = it.x; initialY = it.y } }
+        header.onDrag = { dx, dy ->
+            layoutParams?.let { params ->
+                params.x = (initialX + dx).roundToInt().coerceIn(0, (resources.displayMetrics.widthPixels - params.width).coerceAtLeast(0))
+                params.y = (initialY + dy).roundToInt().coerceIn(0, (resources.displayMetrics.heightPixels - dp(56)).coerceAtLeast(0))
+                updateWindow()
+            }
+        }
+        header.onDragEnd = {
+            layoutParams?.takeIf { FloatingWindowStateManager.snapshot.value.minimized }?.let { params ->
+                params.x = if (params.x + params.width / 2 < resources.displayMetrics.widthPixels / 2) dp(8)
+                    else resources.displayMetrics.widthPixels - params.width - dp(8)
+                updateWindow()
             }
         }
     }
 
-    /**
-     * Sets up click listeners for the floating window buttons.
-     */
-    private fun setupButtons() {
-        floatingView?.findViewById<ImageButton>(R.id.btn_open_app)?.setOnClickListener {
-            // Open MainActivity
-            val intent =
-                Intent(this, MainActivity::class.java).apply {
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-                }
-            startActivity(intent)
-        }
-
-        floatingView?.findViewById<ImageButton>(R.id.btn_minimize)?.setOnClickListener {
-            toggleMinimize()
-        }
-
-        floatingView?.findViewById<ImageButton>(R.id.btn_close)?.setOnClickListener {
-            // Closing is explicit: do not resurrect the service on the next app background event.
-            if (TaskExecutionManager.isTaskRunning()) TaskExecutionManager.cancelTask()
-            FloatingWindowStateManager.close(this)
-        }
-
-        floatingView?.findViewById<MaterialButton>(R.id.btn_stop)?.setOnClickListener {
-            Logger.d(TAG, "Stop button clicked")
-            TaskExecutionManager.cancelTask()
-        }
-
-        floatingView?.findViewById<MaterialButton>(R.id.btn_finish_wait)?.setOnClickListener {
-            TaskExecutionManager.finishWaiting()
-        }
-
-        floatingView?.findViewById<MaterialButton>(R.id.btn_pause)?.setOnClickListener {
-            Logger.d(TAG, "Pause button clicked")
-            TaskExecutionManager.pauseTask()
-        }
-
-        floatingView?.findViewById<MaterialButton>(R.id.btn_resume)?.setOnClickListener {
-            Logger.d(TAG, "Resume button clicked")
-            TaskExecutionManager.resumeTask()
-        }
-
-        floatingView?.findViewById<MaterialButton>(R.id.btn_new_task)?.setOnClickListener {
-            Logger.d(TAG, "New task button clicked")
-            // Reset TaskExecutionManager and local UI state
-            TaskExecutionManager.resetTask()
-            floatingView?.findViewById<EditText>(R.id.task_input)?.text?.clear()
-        }
+    private fun addWindowInternal() {
+        val view = floatingView ?: return
+        if (isAttached.get()) return
+        try { windowManager?.addView(view, layoutParams); isAttached.set(true) }
+        catch (error: Exception) { Logger.e(TAG, "Could not attach overlay", error) }
     }
-
-    /**
-     * Toggles the minimized state of the floating window.
-     */
-    private fun toggleMinimize() {
-        FloatingWindowStateManager.setMinimized(!FloatingWindowStateManager.snapshot.value.minimized)
+    private fun removeWindowInternal() {
+        cancelKeyboardRequest()
+        if (!isAttached.get()) return
+        try { windowManager?.removeView(floatingView) }
+        catch (error: Exception) { Logger.e(TAG, "Could not detach overlay", error) }
+        finally { isAttached.set(false) }
     }
-
-    internal fun applyMinimizedPresentation(minimized: Boolean) {
-        if (floatingView == null) return
-        val inputArea = floatingView?.findViewById<LinearLayout>(R.id.input_area)
-        val recyclerView = floatingView?.findViewById<RecyclerView>(R.id.steps_recycler_view)
-        val resultView = floatingView?.findViewById<TextView>(R.id.tv_result)
-        val stopBtn = floatingView?.findViewById<MaterialButton>(R.id.btn_stop)
-        val pauseBtn = floatingView?.findViewById<MaterialButton>(R.id.btn_pause)
-        val resumeBtn = floatingView?.findViewById<MaterialButton>(R.id.btn_resume)
-        val newTaskBtn = floatingView?.findViewById<MaterialButton>(R.id.btn_new_task)
-        val minimizeBtn = floatingView?.findViewById<ImageButton>(R.id.btn_minimize)
-        val container = floatingView?.findViewById<View>(R.id.floating_window_container)
-        val tokenUsage = floatingView?.findViewById<View>(R.id.token_usage)
-        val interaction = floatingView?.findViewById<View>(R.id.interaction_panel)
-        val finishWait = floatingView?.findViewById<View>(R.id.btn_finish_wait)
-        val previousWidth = layoutParams?.width
-        val previousHeight = layoutParams?.height
-
-        tokenUsage?.visibility = if (minimized) View.GONE else View.VISIBLE
-
-        val displayMetrics = resources.displayMetrics
-        val screenWidth = displayMetrics.widthPixels
-        val screenHeight = displayMetrics.heightPixels
-
-        if (minimized) {
-            // Hide all content except header
-            inputArea?.visibility = View.GONE
-            recyclerView?.visibility = View.GONE
-            resultView?.visibility = View.GONE
-            stopBtn?.visibility = View.GONE
-            pauseBtn?.visibility = View.GONE
-            resumeBtn?.visibility = View.GONE
-            newTaskBtn?.visibility = View.GONE
-            interaction?.visibility = View.GONE
-            finishWait?.visibility = View.GONE
-            // Change icon to + (expand)
-            minimizeBtn?.setImageResource(R.drawable.ic_plus)
-
-            // Shrink window to just header - use fixed height based on header size
-            layoutParams?.width = (screenWidth * WIDTH_PERCENT * 0.8).toInt()
-            // Use a fixed height for minimized state (header height ~48dp)
-            val headerHeight = (48 * displayMetrics.density).toInt()
-            layoutParams?.height = headerHeight
-        } else {
-            // Restore based on current status
-            updateUIForStatus(TaskExecutionManager.taskState.value.status)
-            val pending = TaskExecutionManager.pendingInteraction.value
-            interaction?.visibility = if (pending == null) View.GONE else View.VISIBLE
-            finishWait?.visibility = if (TaskExecutionManager.activeWait.value == null) View.GONE else View.VISIBLE
-            if (resultView?.text?.isNotEmpty() == true) {
-                resultView.visibility = View.VISIBLE
-            }
-            // Change icon to - (minimize)
-            minimizeBtn?.setImageResource(R.drawable.ic_minus)
-
-            // Restore full window size
-            layoutParams?.width = (screenWidth * WIDTH_PERCENT).toInt()
-            layoutParams?.height = (screenHeight * HEIGHT_PERCENT).toInt()
-        }
-
-        if (isAttached.get() && (previousWidth != layoutParams?.width || previousHeight != layoutParams?.height)) {
-            try {
-                windowManager?.updateViewLayout(floatingView, layoutParams)
-            } catch (e: Exception) {
-                Logger.e(TAG, "Error updating layout after minimize", e)
-            }
-        }
+    private fun updateWindow() {
+        if (!isAttached.get()) return
+        val params = layoutParams ?: return
+        params.x = params.x.coerceIn(0, (resources.displayMetrics.widthPixels - params.width).coerceAtLeast(0))
+        try { windowManager?.updateViewLayout(floatingView, params) }
+        catch (error: Exception) { Logger.e(TAG, "Could not resize overlay", error) }
     }
-
+    private fun cardWidth() = minOf(resources.displayMetrics.widthPixels - dp(24), dp(400)).coerceAtLeast(dp(200))
+    private fun dp(value: Int) = (value * resources.displayMetrics.density).roundToInt()
+    private fun visible(view: View, id: Int, visible: Boolean) {
+        val child = view.findViewById<View>(id)
+        val next = if (visible) View.VISIBLE else View.GONE
+        if (child.visibility == next) return
+        if (!visible && (id == R.id.input_area || id == R.id.interaction_panel)) clearInputFocus()
+        child.animate().cancel()
+        child.visibility = next
+        if (visible && isAttached.get() && (Build.VERSION.SDK_INT < 26 || ValueAnimator.areAnimatorsEnabled())) {
+            child.alpha = 0f
+            child.translationY = dp(5).toFloat()
+            child.animate().alpha(1f).translationY(0f).setStartDelay(40).setDuration(180).start()
+        } else { child.alpha = 1f; child.translationY = 0f }
+    }
 }

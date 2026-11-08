@@ -4,6 +4,7 @@ import android.view.Gravity
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.core.content.ContextCompat
@@ -46,6 +47,8 @@ class ChatMessageAdapter : RecyclerView.Adapter<ChatMessageAdapter.MessageViewHo
         private val card = view.findViewById<MaterialCardView>(R.id.chatMessageCard)
         private val role = view.findViewById<TextView>(R.id.chatMessageRole)
         private val text = view.findViewById<TextView>(R.id.chatMessageText)
+        private val imageScroll = view.findViewById<View>(R.id.chatMessageImageScroll)
+        private val images = view.findViewById<LinearLayout>(R.id.chatMessageImages)
 
         fun bind(message: HistoryMessage) {
             val user = message.role == HistoryMessageRole.USER
@@ -58,7 +61,23 @@ class ChatMessageAdapter : RecyclerView.Adapter<ChatMessageAdapter.MessageViewHo
                 if (user) R.color.surface_variant else R.color.surface))
             role.setText(if (user) R.string.chat_you else R.string.chat_assistant)
             text.text = message.text
-            android.text.util.Linkify.addLinks(text, android.text.util.Linkify.WEB_URLS)
+            text.visibility = if (message.text.isEmpty()) View.GONE else View.VISIBLE
+            if (message.text.isNotEmpty()) android.text.util.Linkify.addLinks(text, android.text.util.Linkify.WEB_URLS)
+            images.removeAllViews()
+            imageScroll.visibility = if (message.images.isEmpty()) View.GONE else View.VISIBLE
+            val density = itemView.resources.displayMetrics.density
+            message.images.forEach { image ->
+                val thumbnail = ImageView(itemView.context).apply {
+                    layoutParams = LinearLayout.LayoutParams((200 * density).toInt(), (140 * density).toInt()).apply {
+                        marginEnd = (8 * density).toInt()
+                    }
+                    scaleType = ImageView.ScaleType.CENTER_CROP
+                    contentDescription = itemView.context.getString(R.string.chat_image)
+                }
+                val bitmap = ChatImageDecoder.decode(image.path, 400)
+                if (bitmap != null) thumbnail.setImageBitmap(bitmap) else thumbnail.visibility = View.GONE
+                images.addView(thumbnail)
+            }
         }
     }
 }

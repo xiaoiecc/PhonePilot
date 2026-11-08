@@ -20,6 +20,9 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 /** Owns one execution and every mutable user-visible task fact. Android views only submit commands. */
 class RunCoordinator(
@@ -27,8 +30,10 @@ class RunCoordinator(
     private val runnerProvider: () -> AgentRunner?,
     private val onFinalize: suspend (runId: String, outcome: RunOutcome) -> Unit = { _, _ -> },
     private val clockMs: () -> Long = { System.nanoTime() / 1_000_000 },
+    private val switchPlacement: suspend (String, ExecutionMode) -> Unit = { _, _ -> error("当前设备尚未支持切换执行位置") },
 ) {
     private val lock = Any()
+    private val deviceGate = Mutex()
     private val ids = AtomicLong()
     private val mutableSnapshot = MutableStateFlow(RunSnapshot())
     val snapshot: StateFlow<RunSnapshot> = mutableSnapshot.asStateFlow()
@@ -36,6 +41,8 @@ class RunCoordinator(
     val messages: StateFlow<List<ChatMessage>> = mutableMessages.asStateFlow()
     private val mutableCompletions = MutableSharedFlow<RunCompletion>(extraBufferCapacity = 64)
     val completions: SharedFlow<RunCompletion> = mutableCompletions.asSharedFlow()
+    private val mutableDeviceToolRequests = MutableSharedFlow<String>(extraBufferCapacity = 64)
+    val deviceToolRequests: SharedFlow<String> = mutableDeviceToolRequests.asSharedFlow()
 
     private class InteractionSlot(val pending: PendingInteraction, val reply: CompletableDeferred<InteractionReply>)
     private class WaitSlot(val wait: ActiveWait, var skipped: Boolean = false)
@@ -46,6 +53,11 @@ class RunCoordinator(
         val pauses = mutableSetOf<PauseReason>()
         var interaction: InteractionSlot? = null
         var wait: WaitSlot? = null
+        var placementJob: Job? = null
+        var mode = ExecutionMode.FOREGROUND
+        var placementGeneration = 0L
+        var placementRequest: ExecutionMode? = null
+        var placementError: String? = null
     }
 
     private var active: ActiveRun? = null
@@ -59,9 +71,14 @@ class RunCoordinator(
     }
 
     /** Acceptance is synchronous, so editors clear only input that was actually accepted. */
-    fun submit(text: String, forceNew: Boolean = false): Boolean {
+    fun submit(text: String, forceNew: Boolean = false, images: List<ChatImage> = emptyList(), resumePaused: Boolean = false): Boolean {
         if (!scope.isActive) return false
-        val task = text.trim().takeIf { it.isNotEmpty() } ?: return false
+        val task = text.trim()
+        val attachments = images.toList()
+        if ((task.isEmpty() && attachments.isEmpty()) || attachments.any {
+            it.path.isBlank() || it.mimeType !in setOf("image/webp", "image/png", "image/jpeg")
+        }) return false
+        val input = ChatInput(task, attachments)
         val owner: ActiveRun
         val continuing: Boolean
         synchronized(lock) {
@@ -69,13 +86,16 @@ class RunCoordinator(
             if (running != null) {
                 if (forceNew || !running.stage.acceptsCommands || !running.job.isActive) return false
                 val interaction = running.interaction
+                if (resumePaused && (interaction != null || running.placementError != null)) return false
                 if (interaction?.pending?.kind == InteractionKind.TEXT) {
+                    if (attachments.isNotEmpty()) return false
                     running.pauses.remove(PauseReason.DRAFT)
                     return completeReplyLocked(running, interaction, InteractionReply.Text(task))
                 }
-                val accepted = running.runner.enqueueMessage(task)
+                val accepted = running.runner.enqueueMessage(input)
                 if (accepted) {
                     running.pauses.remove(PauseReason.DRAFT)
+                    if (resumePaused) running.pauses.remove(PauseReason.USER)
                     refreshExecutionStageLocked(running)
                 }
                 return accepted
@@ -100,7 +120,7 @@ class RunCoordinator(
             owner.job = scope.launch(start = CoroutineStart.LAZY) {
                 try {
                     synchronized(lock) { if (active === owner) refreshExecutionStageLocked(owner) }
-                    owner.outcome = runner.run(task, continuing, Control(owner))
+                    owner.outcome = runner.run(input, continuing, Control(owner))
                 } catch (_: CancellationException) {
                     owner.outcome = RunOutcome(false, "任务已被用户取消", mutableSnapshot.value.stepNumber, runner.snapshot())
                 } catch (_: Exception) {
@@ -132,11 +152,12 @@ class RunCoordinator(
         // The run Job is already complete here. This finalizer deliberately retains ownership
         // through persistence, including when cancellation happened before a lazy run started.
         scope.launch(NonCancellable) {
+            owner.placementJob?.cancelAndJoin()
             val persisted = try {
                 onFinalize(owner.id, outcome)
                 outcome
             } catch (_: Exception) {
-                outcome.copy(success = false, message = "${outcome.message}；任务记录保存失败")
+                outcome.copy(success = false, message = "${outcome.message}；任务收尾或记录保存失败，请检查应用归还与任务记录")
             }
             val completed = synchronized(lock) {
                 if (active !== owner) return@synchronized false
@@ -151,6 +172,7 @@ class RunCoordinator(
                     totalInputTokens = persisted.session?.takeIf { it.hasInputUsage }?.totalInputTokens ?: mutableSnapshot.value.totalInputTokens,
                     totalOutputTokens = persisted.session?.takeIf { it.hasOutputUsage }?.totalOutputTokens ?: mutableSnapshot.value.totalOutputTokens,
                     pauseReasons = emptySet(), pendingInteraction = null, activeWait = null,
+                    placementSwitching = false,
                 )
                 true
             }
@@ -177,10 +199,58 @@ class RunCoordinator(
 
     private fun removePause(reason: PauseReason): Boolean = synchronized(lock) {
         val owner = active ?: return false
-        if (!owner.stage.acceptsCommands) return false
+        if (!owner.stage.acceptsCommands || owner.placementError != null) return false
         val changed = owner.pauses.remove(reason)
         refreshExecutionStageLocked(owner)
         changed
+    }
+
+    /** The same device gate serializes placement with accepted device operations. */
+    fun requestExecutionMode(runId: String, mode: ExecutionMode): Boolean {
+        val job = synchronized(lock) {
+            val owner = active?.takeIf { it.id == runId && it.stage.acceptsCommands && it.job.isActive } ?: return false
+            if (owner.placementRequest != null || owner.mode == mode && owner.placementError == null) return false
+            owner.placementRequest = mode
+            owner.placementError = null
+            projectOwnerLocked(owner)
+            mutableDeviceToolRequests.tryEmit(owner.id)
+            scope.launch(start = CoroutineStart.LAZY) {
+                try {
+                    deviceGate.withLock {
+                        synchronized(lock) {
+                            if (active !== owner || !owner.stage.acceptsCommands) throw CancellationException("Expired placement")
+                        }
+                        switchPlacement(owner.id, mode)
+                        synchronized(lock) {
+                            if (active === owner && owner.stage.acceptsCommands) {
+                                owner.mode = mode
+                                owner.placementGeneration++
+                            }
+                        }
+                    }
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (_: Exception) {
+                    synchronized(lock) {
+                        if (active === owner && owner.stage.acceptsCommands) {
+                            owner.pauses.add(PauseReason.USER)
+                            owner.placementError = "切换未完成，已暂停；请检查设备状态后重试"
+                            // A partial migration invalidates observations even when no new mode is published.
+                            owner.placementGeneration++
+                        }
+                    }
+                } finally {
+                    synchronized(lock) {
+                        if (active === owner) {
+                            owner.placementRequest = null
+                            refreshExecutionStageLocked(owner)
+                        }
+                    }
+                }
+            }.also { owner.placementJob = it }
+        }
+        job.start()
+        return true
     }
 
     fun stop(): Boolean {
@@ -192,7 +262,7 @@ class RunCoordinator(
             current
         }
         try { owner.runner.cancelNetwork() } catch (_: Exception) { /* Cancellation still owns the Job. */ }
-        finally { owner.job.cancel() }
+        finally { owner.placementJob?.cancel(); owner.job.cancel() }
         return true
     }
 
@@ -282,17 +352,38 @@ class RunCoordinator(
             pauseReasons = owner.pauses.toSet(),
             pendingInteraction = owner.interaction?.pending,
             activeWait = owner.wait?.wait,
+            executionMode = owner.mode,
+            placementGeneration = owner.placementGeneration,
+            placementSwitching = owner.placementRequest != null,
+            placementError = owner.placementError,
         )
     }
 
     private inner class Control(private val owner: ActiveRun) : RunControl {
         override val runId: String get() = owner.id
+        override val executionMode: ExecutionMode get() = synchronized(lock) { owner.mode }
+        override val placementGeneration: Long get() = synchronized(lock) { owner.placementGeneration }
+
+        override suspend fun <T> deviceOperation(expectedGeneration: Long?, block: suspend () -> T): T {
+            while (true) {
+                checkpoint()
+                deviceGate.lock()
+                val ready = synchronized(lock) {
+                    active === owner && owner.stage.canExecute && owner.placementRequest == null
+                }
+                if (!ready) { deviceGate.unlock(); continue }
+                try {
+                    if (expectedGeneration != null && expectedGeneration != placementGeneration) throw ExecutionTargetChangedException()
+                    return block()
+                } finally { deviceGate.unlock() }
+            }
+        }
 
         override suspend fun checkpoint() {
             currentCoroutineContext().ensureActive()
             mutableSnapshot.first {
                 synchronized(lock) {
-                    active !== owner || owner.stage !in setOf(RunPhase.PAUSED, RunPhase.WAITING_INTERACTION)
+                    active !== owner || (owner.placementRequest == null && owner.stage !in setOf(RunPhase.PAUSED, RunPhase.WAITING_INTERACTION))
                 }
             }
             currentCoroutineContext().ensureActive()
@@ -306,15 +397,21 @@ class RunCoordinator(
             val state = mutableSnapshot.value
             when (progress) {
                 is RunProgress.StepStarted -> mutableSnapshot.value = state.copy(stepNumber = progress.number,
-                    thinking = "", currentAction = "", steps = state.steps + RunStep(progress.number))
+                    thinking = "", steps = state.steps + RunStep(progress.number))
                 is RunProgress.Thinking -> mutableSnapshot.value = state.copy(thinking = progress.text,
                     steps = state.steps.mapIndexed { index, step -> if (index == state.steps.lastIndex) step.copy(thinking = progress.text) else step })
                 is RunProgress.Action -> mutableSnapshot.value = state.copy(currentAction = progress.description,
                     steps = state.steps.mapIndexed { index, step -> if (index == state.steps.lastIndex) step.copy(action = progress.description) else step })
-                is RunProgress.UserMessage -> mutableMessages.value = mutableMessages.value + ChatMessage(ChatRole.USER, progress.text, progress.timestamp)
+                is RunProgress.UserMessage -> mutableMessages.value = mutableMessages.value +
+                    ChatMessage(ChatRole.USER, progress.text, progress.timestamp, progress.images)
                 is RunProgress.AssistantMessage -> mutableMessages.value = mutableMessages.value + ChatMessage(ChatRole.AGENT, progress.text, progress.timestamp)
                 is RunProgress.Usage -> mutableSnapshot.value = state.copy(totalInputTokens = progress.totalInputTokens, totalOutputTokens = progress.totalOutputTokens)
                 is RunProgress.ConversationChanged -> mutableSnapshot.value = state.copy(conversationId = progress.id)
+                RunProgress.DeviceToolsRequested -> {
+                    if (!state.deviceToolsRequested) mutableSnapshot.value = state.copy(deviceToolsRequested = true)
+                    mutableDeviceToolRequests.tryEmit(owner.id)
+                    Unit
+                }
             }
         }
 

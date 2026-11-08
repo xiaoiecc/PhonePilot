@@ -15,6 +15,56 @@ import org.junit.jupiter.api.Test
 class TextInputManagerTest {
     private val originalIme = "com.example.input/.Keyboard"
 
+    @Test fun `IME commands use Android registered short ID rather than equivalent full component`() = runBlocking<Unit> {
+        // Match Android's InputMethodInfo map behavior: only its registered ID is accepted.
+        // Do not use KeyboardHelper.IME_ID as the oracle, otherwise the original bug passes.
+        val registeredId = "com.kevinluo.autoglm/.input.AutoGLMKeyboardService"
+        val gateway = KeyboardGateway(Dispatchers.Unconfined)
+        val editor = FakeKeyboardEditor()
+        val commands = mutableListOf<List<String>>()
+        var selectedIme = originalIme
+        val manager = TextInputManager({ argv, _ ->
+            commands += argv
+            when {
+                argv.first() == "settings" -> CommandResult(0, selectedIme, "")
+                argv.take(2) == listOf("ime", "enable") ->
+                    if (argv.last() == registeredId) CommandResult(0, "", "")
+                    else CommandResult(255, "", "Unknown input method")
+                argv.take(2) == listOf("ime", "set") -> {
+                    if (argv.last() !in listOf(registeredId, originalIme)) {
+                        CommandResult(255, "", "Unknown input method")
+                    } else {
+                        selectedIme = argv.last()
+                        if (selectedIme == registeredId) gateway.activate(this, editor)
+                        CommandResult(0, "", "")
+                    }
+                }
+                else -> error("Unexpected command: $argv")
+            }
+        }, gateway, Dispatchers.Unconfined)
+
+        val result = manager.appendText("accepted once")
+
+        assertTrue(result.success, result.message)
+        assertEquals(listOf("accepted once"), editor.commits)
+        assertEquals(originalIme, selectedIme)
+        assertEquals(listOf("ime", "enable", registeredId), commands[1])
+        assertEquals(listOf("ime", "set", registeredId), commands[2])
+        assertEquals(listOf("ime", "set", originalIme), commands[4])
+    }
+
+    @Test fun `keyboard identity comparisons accept short and full component formats`() {
+        val shortId = "com.kevinluo.autoglm/.input.AutoGLMKeyboardService"
+        val fullId = "com.kevinluo.autoglm/com.kevinluo.autoglm.input.AutoGLMKeyboardService"
+        assertEquals(shortId, KeyboardHelper.IME_ID)
+        assertTrue(KeyboardHelper.isAutoGLMKeyboard(shortId))
+        assertTrue(KeyboardHelper.isAutoGLMKeyboard(fullId))
+        assertTrue(KeyboardHelper.sameIme(shortId, fullId))
+        assertTrue(KeyboardHelper.sameIme(fullId, shortId))
+        assertFalse(KeyboardHelper.sameIme(shortId, "com.other/.input.AutoGLMKeyboardService"))
+        assertFalse(KeyboardHelper.isAutoGLMKeyboard("com.kevinluo.autoglm/.OtherService"))
+    }
+
     @Test fun `replace clear failure prevents text commit and restores original IME`() = runBlocking<Unit> {
         val gateway = KeyboardGateway(Dispatchers.Unconfined)
         val editor = FakeKeyboardEditor().apply { clearAccepted = false }

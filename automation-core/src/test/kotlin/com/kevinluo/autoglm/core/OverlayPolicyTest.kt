@@ -6,7 +6,7 @@ import org.junit.jupiter.api.Test
 class OverlayPolicyTest {
     @Test fun `pause visibility masks nested hides without stealing them and cannot reopen a closed run`() {
         val policy = OverlayPolicy()
-        policy.onRunChanged(RunSnapshot("run", RunPhase.RUNNING))
+        policy.onRunChanged(RunSnapshot("run", RunPhase.RUNNING, deviceToolsRequested = true))
         val outer = policy.acquireHide()
         val inner = policy.acquireHide()
         val pause = policy.acquirePauseVisibility()
@@ -24,13 +24,21 @@ class OverlayPolicyTest {
         stalePause.close()
         outer.close()
         assertFalse(policy.snapshot.value.visible)
-        policy.onRunChanged(RunSnapshot("new", RunPhase.RUNNING))
+        policy.onRunChanged(RunSnapshot("new", RunPhase.RUNNING, deviceToolsRequested = true))
         val currentHide = policy.acquireHide()
         stalePause.close()
         assertFalse(policy.snapshot.value.visible)
         currentHide.close()
         assertTrue(policy.snapshot.value.visible)
     }
+    @Test fun `hosted and text only runs stay in chat until a device tool is requested`() {
+        val policy = OverlayPolicy()
+        policy.onRunChanged(RunSnapshot("run", RunPhase.RUNNING))
+        assertFalse(policy.snapshot.value.visible)
+        policy.onRunChanged(RunSnapshot("run", RunPhase.RUNNING, deviceToolsRequested = true))
+        assertTrue(policy.snapshot.value.visible)
+    }
+
     @Test fun `manual background visibility and active run foreground behavior are preserved`() {
         val policy = OverlayPolicy()
         policy.enableUser()
@@ -39,7 +47,7 @@ class OverlayPolicyTest {
         assertTrue(policy.snapshot.value.visible)
         policy.onAppForeground()
         assertFalse(policy.snapshot.value.visible)
-        policy.onRunChanged(RunSnapshot("run", RunPhase.RUNNING))
+        policy.onRunChanged(RunSnapshot("run", RunPhase.RUNNING, deviceToolsRequested = true))
         assertTrue(policy.snapshot.value.visible)
         policy.disableUser()
         assertTrue(policy.snapshot.value.visible)
@@ -47,7 +55,7 @@ class OverlayPolicyTest {
 
     @Test fun `nested hides restore only after the last lease is released`() {
         val policy = OverlayPolicy()
-        policy.onRunChanged(RunSnapshot("run", RunPhase.RUNNING))
+        policy.onRunChanged(RunSnapshot("run", RunPhase.RUNNING, deviceToolsRequested = true))
         val outer = policy.acquireHide()
         val inner = policy.acquireHide()
         assertFalse(policy.snapshot.value.visible)
@@ -61,14 +69,15 @@ class OverlayPolicyTest {
 
     @Test fun `old leases cannot reopen a user closed window or interfere with a new run`() {
         val policy = OverlayPolicy()
-        policy.onRunChanged(RunSnapshot("old", RunPhase.RUNNING))
+        policy.onRunChanged(RunSnapshot("old", RunPhase.RUNNING, deviceToolsRequested = true))
         val stale = policy.acquireHide()
         policy.close()
         stale.close()
         assertFalse(policy.snapshot.value.visible)
+        assertTrue(policy.snapshot.value.runActive, "Closing the surface must preserve the task's foreground-service lifetime")
         policy.onRunChanged(RunSnapshot("old", RunPhase.FAILED))
         assertFalse(policy.snapshot.value.visible)
-        policy.onRunChanged(RunSnapshot("new", RunPhase.RUNNING))
+        policy.onRunChanged(RunSnapshot("new", RunPhase.RUNNING, deviceToolsRequested = true))
         val current = policy.acquireHide()
         stale.close()
         assertFalse(policy.snapshot.value.visible)
@@ -78,7 +87,7 @@ class OverlayPolicyTest {
 
     @Test fun `completion panel remains until foreground entry and minimization changes only presentation`() {
         val policy = OverlayPolicy()
-        policy.onRunChanged(RunSnapshot("run", RunPhase.RUNNING))
+        policy.onRunChanged(RunSnapshot("run", RunPhase.RUNNING, deviceToolsRequested = true))
         policy.setMinimized(true)
         assertTrue(policy.snapshot.value.visible)
         policy.onRunChanged(RunSnapshot("run", RunPhase.COMPLETED))

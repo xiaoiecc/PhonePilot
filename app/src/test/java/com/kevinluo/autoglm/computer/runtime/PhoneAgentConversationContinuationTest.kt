@@ -29,7 +29,8 @@ class PhoneAgentConversationContinuationTest {
         val h = RunnerHarness(this)
         var requests = 0
         coEvery { h.client.request(any(), any()) } coAnswers {
-            if (++requests == 1) functionResponse("unsafe-response", function("home", "android_system_key", """{"key":"HOME"}"""), text = "Opening home")
+            if (++requests == 1) functionResponse("unsafe-response", function("home", "android_system_key",
+                """{"key":"HOME","commentary":"Opening home"}"""), text = "Opening home")
             else throw IOException("Network unavailable")
         }
         assertFalse(h.run("Original request").success)

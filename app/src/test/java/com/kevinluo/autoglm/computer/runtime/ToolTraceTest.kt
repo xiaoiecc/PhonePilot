@@ -9,6 +9,27 @@ import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.Test
 
 class ToolTraceTest {
+    @Test fun `local Android tools request device presentation`() = runTest {
+        val h = RunnerHarness(this)
+        h.respond(functionResponse("r1", function("home", "android_system_key", """{"key":"HOME"}""")), finalResponse())
+        assertTrue(h.run().success)
+        assertTrue(h.coordinator.snapshot.value.deviceToolsRequested)
+    }
+
+    @Test fun `function computer batch uses the native mapper driver and function screenshot output`() = runTest {
+        val h = RunnerHarness(this)
+        h.respond(screenshotRequest(), functionResponse("r2", function("double", "android_computer",
+            """{"actions":[{"type":"double_click","x":10,"y":20}]}""")), finalResponse())
+        assertTrue(h.run().success)
+        coVerify(exactly = 1) { h.device.doubleTap(15, 30) }
+        coVerify { h.client.request(match { input ->
+            input.any { item ->
+                val json = item.toString()
+                json.contains("function_call_output") && json.contains("double") && json.contains("input_image")
+            }
+        }, "r2") }
+    }
+
     @Test fun `preflight rejection identifies failed call and skipped earlier command without phone input`() = runTest {
         val h = RunnerHarness(this)
         h.respond(functionResponse("r1",

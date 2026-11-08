@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="80dp"
+    android:layout_height="88dp"
+    android:layout_marginEnd="8dp">
+
+    <ImageView
+        android:id="@+id/attachmentImage"
+        android:layout_width="72dp"
+        android:layout_height="72dp"
+        android:layout_gravity="bottom|start"
+        android:contentDescription="@string/chat_image"
+        android:scaleType="centerCrop"
+        android:background="@color/surface_variant" />
+
+    <ImageButton
+        android:id="@+id/attachmentRemove"
+        android:layout_width="32dp"
+        android:layout_height="32dp"
+        android:layout_gravity="top|end"
+        android:background="@drawable/bg_dialog_rounded"
+        android:contentDescription="@string/chat_remove_image"
+        android:src="@drawable/ic_close"
+        android:padding="7dp"
+        app:tint="@color/icon_secondary" />
+</FrameLayout>

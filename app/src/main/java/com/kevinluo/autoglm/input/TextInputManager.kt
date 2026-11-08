@@ -21,8 +21,10 @@ class TextInputManager internal constructor(
     private val gateway: KeyboardGateway,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
     private val readinessTimeoutMs: Long = 2000,
+    private val expectedTarget: () -> Pair<Int, String>? = { null },
 ) {
-    constructor(userService: IUserService) : this(commandRunner(userService), KeyboardInputGateway.gateway)
+    constructor(userService: IUserService, expectedTarget: () -> Pair<Int, String>? = { null }) :
+        this(commandRunner(userService), KeyboardInputGateway.gateway, expectedTarget = expectedTarget)
 
     private val operation = Mutex()
 
@@ -50,14 +52,24 @@ class TextInputManager internal constructor(
                             originalIme = current
                             command(listOf("ime", "set", KeyboardHelper.IME_ID), COMMAND_TIMEOUT_MS).succeeded
                         } else false
-                        if (!switched || !awaitSelectedIme()) {
-                            result = InputResult.failure("无法切换至 AutoGLM Keyboard，请确认键盘已启用")
+                        when {
+                            !enabled.succeeded -> result = InputResult.failure("AutoGLM Keyboard 启用命令未成功（exitCode=${enabled.exitCode ?: "未知"}）")
+                            !switched -> result = InputResult.failure("AutoGLM Keyboard 切换命令未成功，请确认键盘已启用")
+                            !awaitSelectedIme() -> result = InputResult.failure("切换命令已接受，但未读取到 AutoGLM Keyboard 成为当前输入法")
                         }
                     }
                     if (result == null) {
                         val editor = gateway.awaitEditor(readinessTimeoutMs, previousEditor, request?.staleEditorGeneration)
+                        val target = expectedTarget()
+                        val targetVerified = target == null || (editor?.packageName == target.second && target.first > 0 &&
+                            command(listOf("dumpsys", "input_method"), COMMAND_TIMEOUT_MS).let {
+                                it.succeeded && ImeTargetIdentity.focusedDisplay(it.stdout) == target.first
+                            })
                         result = if (editor == null) InputResult.failure("键盘未连接到输入框，未发送文字")
-                            else gateway.input(editor, text, replace, request?.guard ?: { true })
+                            else if (!targetVerified) InputResult.failure("无法确认键盘连接到后台目标应用，未发送文字；可切到前台继续")
+                            else gateway.input(editor, text, replace) { stage ->
+                                expectedTarget() == target && (request?.guard?.invoke(stage) ?: true)
+                            }
                     }
                 }
             } catch (error: CancellationException) {

@@ -136,7 +136,7 @@ class ResponsesComputerClient(
                         if (continuation.isActive) {
                             continuation.resumeWithException(
                                 if (operation.cancelled.isCompleted) CancellationException("Computer request cancelled")
-                                else ResponsesRetryPolicy.transport(e, attempt),
+                                else ResponsesRetryPolicy.transport(e, attempt, safeErrorMessage(e.message)),
                             )
                         }
                     }
@@ -145,25 +145,31 @@ class ResponsesComputerClient(
                         response.use {
                             try {
                                 if (!response.isSuccessful) {
-                                    // Only machine-readable codes/parameter names are shown; never raw error text.
+                                    // Preserve the server diagnostic after removing credentials and encoded payloads.
                                     val error = runCatching {
                                         (Json.parseToJsonElement(response.peekBody(8192).string()) as? JsonObject)
                                             ?.get("error") as? JsonObject
                                     }.getOrNull()
                                     fun safeField(name: String): String? = (error?.get(name) as? JsonPrimitive)
                                         ?.content?.takeIf { safeToken(it, "[a-zA-Z0-9_.\\[\\]-]{1,80}") && it != "null" }
+                                    val errorType = safeField("type")
                                     val requestId = response.header("x-request-id")?.takeIf { safeToken(it, "req_[a-zA-Z0-9_-]{1,100}") }
-                                    throw OpenAiHttpException(response.code, safeField("code"), safeField("type"), safeField("param"), requestId,
-                                        ResponsesRetryPolicy.retryAfterMillis(response.header("retry-after-ms"), response.header("retry-after"), nowMillis()), attempt)
+                                    val message = safeErrorMessage((error?.get("message") as? JsonPrimitive)?.content)
+                                    throw OpenAiHttpException(response.code, safeField("code"), errorType, safeField("param"), requestId,
+                                        ResponsesRetryPolicy.retryAfterMillis(response.header("retry-after-ms"), response.header("retry-after"), nowMillis()), attempt,
+                                        message)
                                 }
                                 val responseBody = response.body?.string()
                                     ?: throw ComputerProtocolException("Empty OpenAI response")
                                 val result = try { ComputerProtocol.parseResponse(responseBody) }
-                                    catch (_: Exception) { throw ComputerProtocolException("OpenAI returned an invalid Responses payload") }
+                                    catch (_: Exception) {
+                                        // Decoder failures may quote JSON source, including user content.
+                                        throw ComputerProtocolException("OpenAI returned an invalid Responses payload")
+                                    }
                                 if (continuation.isActive) continuation.resume(result)
                             } catch (error: Exception) {
                                 val safe = if (error is IOException && error !is OpenAiHttpException && error !is OpenAiTransportException)
-                                    ResponsesRetryPolicy.transport(error, attempt) else error
+                                    ResponsesRetryPolicy.transport(error, attempt, safeErrorMessage(error.message)) else error
                                 if (continuation.isActive) continuation.resumeWithException(safe)
                             }
                         }
@@ -173,6 +179,23 @@ class ResponsesComputerClient(
         } finally {
             cancelRegistration?.dispose()
             operation.detach(call)
+        }
+    }
+
+    private fun safeErrorMessage(value: String?): String? {
+        val sanitized = value
+            ?.replace(config.apiKey, "[redacted]")
+            ?.replace(Regex("(?i)Bearer\\s+\\S+"), "[redacted]")
+            // URLs may contain proxy credentials, subscription tokens or signed fragments.
+            ?.replace(Regex("(?i)https?://[^\\s\"'<>]+"), "[redacted-url]")
+            ?.replace(Regex("""(?i)\b(?:authorization|proxy-authorization|cookie|set-cookie)["']?\s*[:=]\s*[^\r\n]+"""), "[redacted-header]")
+            ?.replace(Regex("""(?i)(["']?\b(?:[a-z0-9_-]*(?:api[_-]?key|password|passwd|secret|token)|key)["']?\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,;}&]+)"""), "$1[redacted]")
+            ?.replace(Regex("\\bsk-[A-Za-z0-9_-]+"), "[redacted]")
+            ?.replace(Regex("data:image/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=\\r\\n]+"), "[encoded-data]")
+            ?.replace(Regex("[A-Za-z0-9+/=]{128,}"), "[encoded-data]")
+            ?.replace(Regex("[\\p{Cntrl}]"), " ")
+        return sanitized?.takeIf { it.isNotBlank() }?.let {
+            if (it.length <= 2048) it else it.take(2034) + " [truncated]"
         }
     }
 

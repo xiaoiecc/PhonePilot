@@ -145,14 +145,15 @@ class FunctionToolBackendTest {
 
     @Test fun `chat reply answers pending question instead of entering the unrelated instruction queue`() = runTest {
         val h = RunnerHarness(this)
-        h.respond(functionResponse("r1", function("ask", "android_ask_user", """{"question":"Question"}""")), finalResponse())
+        h.respond(functionResponse("r1", function("ask", "android_ask_user",
+            """{"question":"Question","commentary":"先确认需要你提供的信息。"}""")), finalResponse())
         h.begin()
         val pending = requireNotNull(h.coordinator.snapshot.value.pendingInteraction)
         assertEquals(InteractionKind.TEXT, pending.kind)
         assertFalse(h.coordinator.pauseForDraft())
         assertTrue(h.coordinator.submit("actual answer"))
         assertTrue(h.settle().success)
-        assertEquals(listOf("task", "Question", "actual answer", "done"), h.coordinator.messages.value.map { it.text })
+        assertEquals(listOf("task", "先确认需要你提供的信息。", "Question", "actual answer", "done"), h.coordinator.messages.value.map { it.text })
         coVerify { h.client.request(match { it.singleOrNull()?.jsonObject?.get("call_id")?.jsonPrimitive?.content == "ask" &&
             it.singleOutput() == "User replied: actual answer" }, "r1") }
     }

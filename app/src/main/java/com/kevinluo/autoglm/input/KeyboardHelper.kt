@@ -19,8 +19,12 @@ object KeyboardHelper {
     /** AutoGLM package name. */
     private const val PACKAGE_NAME = com.kevinluo.autoglm.BuildConfig.APPLICATION_ID
 
-    /** AutoGLM Keyboard IME ID (Android system format). */
-    const val IME_ID = "$PACKAGE_NAME/com.kevinluo.autoglm.input.AutoGLMKeyboardService"
+    /**
+     * Registered InputMethodInfo ID, using ComponentName.flattenToShortString().
+     * The IME command looks up this exact ID; a fully qualified component string
+     * can identify the same service but is not the registered IME map key.
+     */
+    const val IME_ID = "$PACKAGE_NAME/.input.AutoGLMKeyboardService"
 
     /**
      * Checks if the given IME ID belongs to AutoGLM Keyboard.

@@ -18,6 +18,7 @@ class HostedToolsRunnerTest {
         coVerify(exactly = 0) { h.device.tap(any(), any()) }
         coVerify(exactly = 0) { h.screenshots.capture() }
         coVerify(exactly = 1) { h.client.request(any(), any()) }
+        assertFalse(h.coordinator.snapshot.value.deviceToolsRequested)
     }
 
     @Test fun `hosted only response continues using cursor without fabricating function outputs`() = runTest {

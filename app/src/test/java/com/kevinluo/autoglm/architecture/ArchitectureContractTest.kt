@@ -62,8 +62,8 @@ class ArchitectureContractTest {
                 (relative.startsWith("history/") && (file.fileName.toString().endsWith("Activity.kt") || file.fileName.toString().endsWith("Fragment.kt")))
         }
         assertTrue(uiFiles.isNotEmpty(), "UI source discovery must not silently become empty")
-        val backendType = Regex("\\b(DeviceExecutor|DeviceCommandClient|IUserService|AndroidToolExecutor|AndroidComputerDriver|FunctionToolBackend|ResponsesAgentRunner|ScreenshotService|ProcessBuilder|Runtime)\\b")
-        val backendImport = Regex("(?m)^\\s*import\\s+com\\.kevinluo\\.autoglm\\.(device|computer\\.runtime)\\.")
+        val backendType = Regex("\\b(DeviceExecutor|DeviceCommandClient|DisplaySessionClient|PrivilegedDisplaySession|SystemTaskBridge|IUserService|AndroidToolExecutor|AndroidComputerDriver|FunctionToolBackend|ResponsesAgentRunner|ScreenshotService|ProcessBuilder|Runtime)\\b")
+        val backendImport = Regex("(?m)^\\s*import\\s+com\\.kevinluo\\.autoglm\\.(device|display|computer\\.runtime)\\.")
         val backendProperty = Regex("\\.\\s*(phoneAgent|agentRunner|deviceExecutor|toolExecutor|screenshotService)\\b|get(?:PhoneAgent|AgentRunner|DeviceExecutor|ToolExecutor)\\s*\\(")
         val failures = uiFiles.mapNotNull { file ->
             val code = codeOnly(readSource(file))

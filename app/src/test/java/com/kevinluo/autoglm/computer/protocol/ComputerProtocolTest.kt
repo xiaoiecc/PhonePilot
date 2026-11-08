@@ -39,7 +39,9 @@ class ComputerProtocolTest {
         val input = ComputerProtocol.initialInput("Open Settings", "UklGR-example", 720, 1280)
         val request = ComputerProtocol.requestBody(config, input, null)
         assertEquals("gpt-6.1-terra", request["model"]?.jsonPrimitive?.content)
-        assertEquals("computer", request["tools"]?.jsonArray?.first()?.jsonObject?.get("type")?.jsonPrimitive?.content)
+        val tools = request["tools"]!!.jsonArray.map { it.jsonObject }
+        assertTrue(tools.none { it["type"]?.jsonPrimitive?.content == "computer" })
+        assertTrue(tools.any { it["name"]?.jsonPrimitive?.content == "android_computer" })
         val content = input.single().jsonObject["content"]!!.jsonArray
         assertEquals("input_text", content[0].jsonObject["type"]?.jsonPrimitive?.content)
         assertTrue(content[0].jsonObject["text"]!!.jsonPrimitive.content.contains("720x1280"))
@@ -50,6 +52,42 @@ class ComputerProtocolTest {
             assertFalse(request.containsKey(it))
         }
         assertEquals("medium", request["reasoning"]!!.jsonObject["effort"]?.jsonPrimitive?.content)
+    }
+
+    @Test
+    fun `one user message retains multiple image order and allows image only input`() {
+        val images = listOf(
+            ResponsesImage("image/webp", "first-image"),
+            ResponsesImage("image/png", "iVBOR-second"),
+            ResponsesImage("image/jpeg", "/9j/third"),
+        )
+        val message = ComputerProtocol.userInput("", images)
+        val content = message["content"]!!.jsonArray
+        assertEquals(3, content.size)
+        assertEquals(listOf("first-image", "iVBOR-second", "/9j/third"), content.map {
+            it.jsonObject["image_url"]!!.jsonPrimitive.content.substringAfter("base64,")
+        })
+        assertEquals(listOf("image/webp", "image/png", "image/jpeg"), content.map {
+            it.jsonObject["image_url"]!!.jsonPrimitive.content.substringAfter("data:").substringBefore(';')
+        })
+        assertTrue(content.all { it.jsonObject["type"]!!.jsonPrimitive.content == "input_image" })
+        assertTrue(content.all { it.jsonObject["detail"]!!.jsonPrimitive.content == "original" })
+        assertThrows(IllegalArgumentException::class.java) { ComputerProtocol.userInput("  ", emptyList()) }
+    }
+
+    @Test
+    fun `multi image requests use the function replacement and retain every image`() {
+        val message = ComputerProtocol.userInput("Compare", listOf(
+            ResponsesImage("image/webp", "first"), ResponsesImage("image/webp", "second"),
+        ))
+        val request = ComputerProtocol.requestBody(config, JsonArray(listOf(message)), null)
+        val tools = request["tools"]!!.jsonArray.map { it.jsonObject }
+        assertTrue(tools.none { it["type"]?.jsonPrimitive?.content == "computer" })
+        assertTrue(tools.any { it["name"]?.jsonPrimitive?.content == "android_computer" })
+        assertTrue(tools.any { it["name"]?.jsonPrimitive?.content == "android_ui" })
+        assertTrue(tools.any { it["name"]?.jsonPrimitive?.content == "android_gesture" })
+        assertTrue(tools.any { it["name"]?.jsonPrimitive?.content == "android_screenshot" })
+        assertEquals(3, message["content"]!!.jsonArray.size)
     }
 
     @Test
@@ -151,9 +189,9 @@ class ComputerProtocolTest {
     @Test
     fun `function and computer interleaving retains wire order`() {
         val body = """{"id":"r","status":"completed","output":[
-            {"type":"function_call","status":"completed","call_id":"f1","name":"android_ui","arguments":"{\"operation\":\"observe\",\"snapshot_id\":null,\"node_id\":null,\"text\":null}"},
+            {"type":"function_call","status":"completed","call_id":"f1","name":"android_ui","arguments":"{\"operation\":\"observe\",\"snapshot_id\":null,\"node_id\":null,\"text\":null,\"commentary\":\"Read the current page.\"}"},
             {"type":"computer_call","status":"completed","call_id":"c1","actions":[{"type":"screenshot"}]},
-            {"type":"function_call","status":"completed","call_id":"f2","name":"android_screenshot","arguments":"{}"}
+            {"type":"function_call","status":"completed","call_id":"f2","name":"android_screenshot","arguments":"{\"commentary\":\"Inspect the image details.\"}"}
         ]}"""
         val response = ComputerProtocol.parseResponse(body)
         assertEquals(listOf("f1", "c1", "f2"), response.outputOrder)
@@ -163,10 +201,10 @@ class ComputerProtocolTest {
     @Test
     fun `strict tools declare required nullable arguments and reject wrong action inputs`() {
         val request = ComputerProtocol.requestBody(config, ComputerProtocol.initialInput("task", "tree"), null)
-        val ui = request["tools"]!!.jsonArray[1].jsonObject
+        val ui = request["tools"]!!.jsonArray[0].jsonObject
         assertEquals("true", ui["strict"]!!.jsonPrimitive.content)
         assertEquals(13, ui["parameters"]!!.jsonObject["required"]!!.jsonArray.size)
-        val bad = """{"id":"r","status":"completed","output":[{"type":"function_call","status":"completed","call_id":"f","name":"android_ui","arguments":"{\"operation\":\"click\",\"snapshot_id\":null,\"node_id\":null,\"text\":null}"}]}"""
+        val bad = """{"id":"r","status":"completed","output":[{"type":"function_call","status":"completed","call_id":"f","name":"android_ui","arguments":"{\"operation\":\"click\",\"snapshot_id\":null,\"node_id\":null,\"text\":null,\"commentary\":\"Open the selected item.\"}"}]}"""
         assertThrows(ComputerProtocolException::class.java) { ComputerProtocol.parseResponse(bad) }
     }
 
@@ -175,7 +213,7 @@ class ComputerProtocolTest {
         val request = ComputerProtocol.requestBody(config, ComputerProtocol.initialInput("task", "tree"), null)
         val functions = request["tools"]!!.jsonArray.map { it.jsonObject }.filter { it["type"]?.jsonPrimitive?.content == "function" }
         assertEquals(setOf(
-            "android_ui", "android_screenshot", "android_gesture", "android_input_text",
+            "android_ui", "android_screenshot", "android_computer", "android_gesture", "android_input_text",
             "android_launch_app", "android_list_apps", "android_system_key", "android_take_over",
             "android_interact", "android_note", "android_ask_user", "android_wait",
         ), functions.map { it["name"]!!.jsonPrimitive.content }.toSet())
@@ -183,6 +221,18 @@ class ComputerProtocolTest {
             assertTrue(tool["strict"]!!.jsonPrimitive.content.toBoolean())
             assertFalse(tool["parameters"]!!.jsonObject["additionalProperties"]!!.jsonPrimitive.content.toBoolean())
         }
+        val computer = functions.single { it["name"]!!.jsonPrimitive.content == "android_computer" }
+        val variants = computer["parameters"]!!.jsonObject["properties"]!!.jsonObject["actions"]!!.jsonObject["items"]!!.jsonObject["anyOf"]!!.jsonArray.map { it.jsonObject }
+        val actionTypes = variants.map { variant ->
+            variant["properties"]!!.jsonObject["type"]!!.jsonObject["enum"]!!.jsonArray.single().jsonPrimitive.content
+        }.toSet()
+        assertEquals(setOf("click", "double_click", "drag", "move", "scroll", "keypress", "type", "wait", "screenshot"), actionTypes)
+        val click = variants.single { it["properties"]!!.jsonObject["type"]!!.jsonObject["enum"]!!.jsonArray.single().jsonPrimitive.content == "click" }
+        assertEquals("string", click["properties"]!!.jsonObject["button"]!!.jsonObject["type"]!!.jsonPrimitive.content)
+        assertEquals(setOf("left", "right", "wheel", "back", "forward"),
+            click["properties"]!!.jsonObject["button"]!!.jsonObject["enum"]!!.jsonArray.map { it.jsonPrimitive.content }.toSet())
+        assertTrue(click["required"]!!.jsonArray.contains(JsonPrimitive("button")))
+
         val gesture = functions.single { it["name"]!!.jsonPrimitive.content == "android_gesture" }
         val gestureProperties = gesture["parameters"]!!.jsonObject["properties"]!!.jsonObject
         assertFalse(gestureProperties["x"]!!.jsonObject.containsKey("minimum"))
@@ -190,6 +240,15 @@ class ComputerProtocolTest {
         assertEquals(5000, gestureProperties["duration_ms"]!!.jsonObject["maximum"]!!.jsonPrimitive.content.toInt())
 
         val valid = listOf(
+            "android_computer" to objectOf("""{"actions":[{"type":"click","x":10,"y":20,"button":"left"}]}"""),
+            "android_computer" to objectOf("""{"actions":[{"type":"double_click","x":10,"y":20,"keys":null}]}"""),
+            "android_computer" to objectOf("""{"actions":[{"type":"drag","path":[{"x":10,"y":20},{"x":30,"y":40}],"keys":null}]}"""),
+            "android_computer" to objectOf("""{"actions":[{"type":"move","x":10,"y":20,"keys":null}]}"""),
+            "android_computer" to objectOf("""{"actions":[{"type":"scroll","x":10,"y":20,"scroll_x":0,"scroll_y":100,"keys":null}]}"""),
+            "android_computer" to objectOf("""{"actions":[{"type":"keypress","keys":["ENTER"]}]}"""),
+            "android_computer" to objectOf("""{"actions":[{"type":"type","text":"hello"}]}"""),
+            "android_computer" to objectOf("""{"actions":[{"type":"wait"}]}"""),
+            "android_computer" to objectOf("""{"actions":[{"type":"screenshot"}]}"""),
             "android_gesture" to objectOf("""{"operation":"swipe","x":10,"y":20,"end_x":30,"end_y":40,"duration_ms":400,"humanized":true,"confirmation_message":null}"""),
             "android_gesture" to objectOf("""{"operation":"long_press","x":10,"y":20,"end_x":null,"end_y":null,"duration_ms":3000,"humanized":false,"confirmation_message":"Confirm"}"""),
             "android_input_text" to objectOf("""{"text":"hello","mode":"replace"}"""),
@@ -207,6 +266,7 @@ class ComputerProtocolTest {
     @Test
     fun `new function tools reject malformed arguments before execution`() {
         val invalid = listOf(
+            "android_computer" to objectOf("""{"actions":[{"type":"click","x":241,"y":196,"button":null}]}"""),
             "android_gesture" to objectOf("""{"operation":"swipe","x":10,"y":20,"end_x":null,"end_y":40,"duration_ms":400,"humanized":true,"confirmation_message":null}"""),
             "android_gesture" to objectOf("""{"operation":"swipe","x":10,"y":20,"end_x":30,"end_y":40,"duration_ms":0,"humanized":true,"confirmation_message":null}"""),
             "android_gesture" to objectOf("""{"operation":"long_press","x":10,"y":20,"end_x":null,"end_y":null,"duration_ms":5001,"humanized":false,"confirmation_message":null}"""),
@@ -248,7 +308,8 @@ class ComputerProtocolTest {
 
     @Test
     fun `semantic actions validate their operation specific arguments`() {
-        listOf("long_click", "append_text", "show", "set_selection", "set_progress", "custom_action").forEach { operation ->
+        listOf("long_click", "append_text", "show", "set_selection", "set_progress", "custom_action",
+            "scroll_forward", "scroll_backward", "scroll_up", "scroll_down", "scroll_left", "scroll_right").forEach { operation ->
             val args = uiArguments(operation)
             assertEquals(operation, parseFunction("android_ui", args).arguments["operation"]!!.jsonPrimitive.content)
         }
@@ -285,7 +346,9 @@ class ComputerProtocolTest {
             parseFunction("android_ui", JsonObject(args + ("operation" to JsonPrimitive("click"))))
         }
         val tools = ComputerProtocol.requestBody(config, ComputerProtocol.initialInput("task", "tree"), null)["tools"]!!.jsonArray
-        val ui = tools.map { it.jsonObject }.single { it["name"]?.jsonPrimitive?.content == "android_ui" }
+        val matching = tools.map { it.jsonObject }.filter { it["name"]?.jsonPrimitive?.content == "android_ui" }
+        assertEquals(1, matching.size, matching.toString())
+        val ui = matching.single()
         val schema = ui["parameters"]!!.jsonObject
         assertEquals(schema["properties"]!!.jsonObject.keys,
             schema["required"]!!.jsonArray.map { it.jsonPrimitive.content }.toSet())
@@ -304,30 +367,57 @@ class ComputerProtocolTest {
     }
 
     @Test
-    fun `every function offers nullable commentary without changing the native computer schema`() {
+    fun `every local function requires bounded non nullable commentary while hosted tools keep their native schemas`() {
         val tools = ComputerProtocol.requestBody(config, ComputerProtocol.initialInput("task", "tree"), null)["tools"]!!.jsonArray
-        assertEquals(setOf("type"), tools.first().jsonObject.keys)
         tools.filter { it.jsonObject["type"]?.jsonPrimitive?.content == "function" }.forEach { value ->
             val parameters = value.jsonObject["parameters"]!!.jsonObject
             val properties = parameters["properties"]!!.jsonObject
             assertEquals(properties.keys, parameters["required"]!!.jsonArray.map { it.jsonPrimitive.content }.toSet())
-            assertEquals(listOf("string", "null"), properties["commentary"]!!.jsonObject["type"]!!.jsonArray.map { it.jsonPrimitive.content })
+            val commentary = properties["commentary"]!!.jsonObject
+            assertEquals("string", commentary["type"]!!.jsonPrimitive.content)
+            assertEquals(1, commentary["minLength"]!!.jsonPrimitive.content.toInt())
+            assertEquals(280, commentary["maxLength"]!!.jsonPrimitive.content.toInt())
+        }
+        tools.filter { it.jsonObject["type"]?.jsonPrimitive?.content != "function" }.forEach {
+            assertFalse(it.jsonObject.containsKey("parameters"))
+            assertFalse(it.toString().contains("commentary"))
         }
         val call = parseFunction("android_screenshot", objectOf("""{"commentary":"我先确认一下这道图片题。"}"""))
         assertEquals("我先确认一下这道图片题。", call.arguments["commentary"]!!.jsonPrimitive.content)
-        parseFunction("android_screenshot", objectOf("""{"commentary":null}"""))
-        parseFunction("android_screenshot", objectOf("{}"))
-        assertThrows(ComputerProtocolException::class.java) {
-            parseFunction("android_screenshot", objectOf("""{"commentary":42}"""))
+        assertEquals(280, parseRawFunction("android_screenshot", buildJsonObject { put("commentary", "x".repeat(280)) })
+            .arguments["commentary"]!!.jsonPrimitive.content.length)
+    }
+
+    @Test
+    fun `missing null blank wrong type and oversized commentary are rejected at the protocol boundary`() {
+        val invalid = listOf(objectOf("{}"), objectOf("""{"commentary":null}"""),
+            objectOf("""{"commentary":42}"""), objectOf("""{"commentary":false}"""),
+            objectOf("""{"commentary":""}"""), buildJsonObject { put("commentary", "  \n\t") },
+            buildJsonObject { put("commentary", "x".repeat(281)) })
+        invalid.forEach { arguments ->
+            assertThrows(ComputerProtocolException::class.java) {
+                parseRawFunction("android_screenshot", arguments)
+            }
         }
-        assertThrows(ComputerProtocolException::class.java) {
-            parseFunction("android_screenshot", buildJsonObject { put("commentary", "x".repeat(281)) })
-        }
+    }
+
+    @Test
+    fun `a computer batch uses one commentary and its internal actions do not need it`() {
+        val arguments = objectOf("""{"commentary":"打开菜单并向下查看选项。","actions":[
+            {"type":"click","x":10,"y":20,"button":"left"},
+            {"type":"scroll","x":10,"y":20,"scroll_x":0,"scroll_y":100}
+        ]}""")
+        val call = parseRawFunction("android_computer", arguments)
+        assertEquals(2, call.arguments["actions"]!!.jsonArray.size)
+        assertTrue(call.arguments["actions"]!!.jsonArray.all { !it.jsonObject.containsKey("commentary") })
     }
 
     private fun objectOf(value: String) = Json.parseToJsonElement(value).jsonObject
 
-    private fun parseFunction(name: String, arguments: JsonObject) = ComputerProtocol.parseResponse(buildJsonObject {
+    private fun parseFunction(name: String, arguments: JsonObject) = parseRawFunction(name,
+        if ("commentary" in arguments) arguments else JsonObject(arguments + ("commentary" to JsonPrimitive("Explain this test action."))))
+
+    private fun parseRawFunction(name: String, arguments: JsonObject) = ComputerProtocol.parseResponse(buildJsonObject {
         put("id", "r-function")
         put("status", "completed")
         put("output", buildJsonArray {

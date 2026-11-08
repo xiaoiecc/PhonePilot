@@ -30,7 +30,8 @@ import org.junit.jupiter.api.Assertions.*
 
 /** Real coordinator, Responses runner, dispatcher, function backend and input driver. Only IO is mocked. */
 @OptIn(ExperimentalCoroutinesApi::class)
-internal class RunnerHarness(val scope: TestScope, maxSteps: Int = 20, service: PhoneAccessibilityService? = null) {
+internal class RunnerHarness(val scope: TestScope, maxSteps: Int = 20, service: PhoneAccessibilityService? = null,
+    beforeDeviceTools: suspend (RunControl) -> Unit = { it.emit(RunProgress.DeviceToolsRequested) }) {
     val client = mockk<ResponsesComputerClient>(relaxed = true)
     val device = mockk<DeviceExecutor>()
     val input = mockk<TextInputManager>()
@@ -64,8 +65,11 @@ internal class RunnerHarness(val scope: TestScope, maxSteps: Int = 20, service: 
         coEvery { screenshots.capture() } returns frame
         val driver = AndroidComputerDriver(device, input)
         val functions = FunctionToolBackend(device, input, apps, swipes) { null }
-        val dispatcher = AndroidToolExecutor(driver, functions, screenshots, history, 0) { service }
-        runner = PhoneAgent(dispatcher, AgentConfig(maxSteps = maxSteps, screenshotDelayMs = 0), history, client)
+        val dispatcher = AndroidToolExecutor(driver, functions, screenshots, history, 0,
+            beforeDeviceTools = beforeDeviceTools) { service }
+        runner = PhoneAgent(dispatcher, AgentConfig(maxSteps = maxSteps, screenshotDelayMs = 0), history, client,
+            imageLoader = { com.kevinluo.autoglm.computer.protocol.ResponsesImage(it.mimeType,
+                "attachment-${java.io.File(it.path).name}") })
         coordinator = RunCoordinator(scope, { runner }, onFinalize = { _, outcome ->
             outcome.session?.let(history::updateConversationSession)
             history.completeTask(outcome.success, outcome.message)
@@ -76,8 +80,9 @@ internal class RunnerHarness(val scope: TestScope, maxSteps: Int = 20, service: 
     }
 
     fun respond(vararg responses: ComputerResponse) { coEvery { client.request(any(), any()) } returnsMany responses.toList() }
-    fun begin(text: String = "task", forceNew: Boolean = false) {
-        assertTrue(coordinator.submit(text, forceNew))
+    fun begin(text: String = "task", forceNew: Boolean = false) = begin(ChatInput(text), forceNew)
+    fun begin(input: ChatInput, forceNew: Boolean = false) {
+        assertTrue(coordinator.submit(input.text, forceNew, input.images))
         scope.advanceTimeBy(300)
         scope.runCurrent()
     }
@@ -86,11 +91,13 @@ internal class RunnerHarness(val scope: TestScope, maxSteps: Int = 20, service: 
         assertFalse(coordinator.isBusy, "A test must resolve its interaction/request before settling")
         return completions.last().outcome
     }
-    fun run(text: String = "task", forceNew: Boolean = false): RunOutcome { begin(text, forceNew); return settle() }
+    fun run(text: String = "task", forceNew: Boolean = false): RunOutcome = run(ChatInput(text), forceNew)
+    fun run(input: ChatInput, forceNew: Boolean = false): RunOutcome { begin(input, forceNew); return settle() }
 }
 
 internal fun obj(value: String): JsonObject = Json.parseToJsonElement(value).jsonObject
-internal fun function(id: String, name: String, arguments: String) = ComputerFunctionCall(id, name, obj(arguments))
+internal fun function(id: String, name: String, arguments: String) = ComputerFunctionCall(id, name,
+    JsonObject(mapOf("commentary" to JsonPrimitive("正在执行 $name")) + obj(arguments)))
 internal fun functionResponse(id: String, vararg calls: ComputerFunctionCall, text: String = "") = ComputerResponse(id, emptyList(), text, calls.toList())
 internal fun screenshotRequest(id: String = "r1", callId: String = "shot") = functionResponse(id, function(callId, "android_screenshot", "{}"))
 internal fun finalResponse(id: String = "final", text: String = "done") = ComputerResponse(id, emptyList(), text)
@@ -103,4 +110,5 @@ internal fun gesture(id: String = "gesture", operation: String = "long_press", x
     put("end_x", endX?.let(::JsonPrimitive) ?: JsonNull); put("end_y", endY?.let(::JsonPrimitive) ?: JsonNull)
     put("duration_ms", 400); put("humanized", operation == "swipe")
     put("confirmation_message", confirmation?.let(::JsonPrimitive) ?: JsonNull)
+    put("commentary", "正在执行手势")
 })

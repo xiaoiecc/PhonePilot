@@ -6,15 +6,25 @@ PhonePilot retains its upstream Android, Shizuku, keyboard and overlay foundatio
 
 [中文](README.md) | English · [Changes from upstream](docs/changes-from-upstream.md)
 
+## Download
+
+[Download the locally built 1.0.3 APK](https://github.com/xiaoiecc/PhonePilot/releases/download/v1.0.3/PhonePilot-1.0.3-capsule-background-candidate.apk) · [Release notes](https://github.com/xiaoiecc/PhonePilot/releases/tag/v1.0.3)
+
+This is a locally built and device-tested debug-signed candidate, without API keys or subscriptions. Updates require matching signatures. Background execution is currently enabled only for the tested Android 12 / API 31 profile; other versions retain foreground operation.
+
 ## What improved
 
-- **Native tool calls and batches:** replaces legacy text-action parsing with official Responses `computer` and Android function tools, ordered action batches, tool results and execution preflight.
+- **New floating capsule:** persistent latest progress, expandable two-line summary, animated interaction controls and an input field that grows up to six lines. Sending while paused continues the same conversation. Background runs keep updating the capsule.
+- **Foreground/background task migration:** Shizuku virtual displays move the existing app task, with background screenshots, input and accessibility operations. Tap the background capsule to return to the foreground. API 31 only; app redirects and background IME compatibility remain limited.
+
+- **Native tool calls and batches:** replaces legacy text-action parsing with the computer-style `android_computer` function and other Android function tools, ordered action batches, tool results and execution preflight.
+- **Chat with multiple image attachments:** normal chat and hosted search/code stay in Chat until a phone tool is requested. Native gallery multi-selection preserves image order and compresses attachments without an additional four-image cap.
 - **Accessibility text and precise actions:** compact semantic observations, local search, node clicks, input and scrolling. Reliable text reduces screenshot uploads; visual observations supplement it when needed. Ordinary clicks validate observation identity and reject stale targets.
 - **Named targeting in dynamic lists:** explicit `android_ui.click_match` relocates an observed target in its original, uniquely identified scroll container using literal conditions. Exact matching or explicit prefixes including the name delimiter require uniqueness in both observations; missing or ambiguous targets cause no click.
 - **Continuous chat and session lists:** continue from the main screen or overlay after a task finishes, or explicitly start a new conversation. Instructions added during execution are handled at safe checkpoints. Draft pauses and manual pauses are managed separately.
-- **Visible feedback and human interaction:** optional model-provided commentary, input/output token counts, and unified text questions, choices, confirmations and manual takeover.
+- **Visible feedback and human interaction:** required commentary for each local tool call (one sentence per batch), persistent latest progress, input/output token counts, and unified text questions, choices, confirmations and manual takeover.
 - **Detailed history and exports:** multi-run conversation timelines show messages, tool arguments, results, errors, durations and states. Before/after images are distinguished; completed actions annotate their actual before-image. Paginated export is supported; missing historical information is not fabricated.
-- **Screenshots on demand:** configurable image dimensions, coordinate mapping and lossless encoding. Resizing changes resolution; “lossless” describes encoding. No fixed token or cost reduction is promised.
+- **Screenshots on demand:** configurable dimensions and coordinate mapping with a single WebP encoding. Android 10 and newer use lossless encoding; older platforms use quality 100 WebP. Resizing changes resolution. No fixed token or cost reduction is promised.
 - **Built-in subscriptions and node selection:** import supported Clash/Mihomo YAML and choose a node. A separate Mihomo process supplies a local proxy for this app without taking over the device VPN.
 
 ## Official OpenAI API support
@@ -75,13 +85,13 @@ The script downloads Mihomo v1.19.33 for Android arm64 and checks SHA-256 for bo
 sh ./gradlew :automation-core:test :app:testDebugUnitTest :app:assembleDebug :app:lintDebug
 ```
 
-The debug APK is under `app/build/outputs/apk/debug/`. The display name is PhonePilot. The package remains `com.kevinluo.autoglm`, with version `1.0.2` / `102`; some artifact filenames retain AutoGLM. In-place updates also require matching signatures; a self-build does not automatically obtain an existing installation's signature. Configure production signing before distribution and keep signing keys private.
+The debug APK is under `app/build/outputs/apk/debug/`. The display name is PhonePilot. The package remains `com.kevinluo.autoglm`, with version `1.0.3` / `103`; some artifact filenames retain AutoGLM. In-place updates also require matching signatures; a self-build does not automatically obtain an existing installation's signature. Configure production signing before distribution and keep signing keys private.
 
 Developer constraints are in [AGENTS.md](AGENTS.md) and the [architecture contract](docs/architecture-contract.md). `:automation-core` is pure Kotlin/JVM; Android capabilities remain in the application layer.
 
 ## Verification scope
 
-Recorded local validation on 2026-11-07 passed **509 automated tests** (19 core and 490 Android JVM), the debug build and lint. Lint still reports warnings. This describes a specific source snapshot, not universal device or app coverage.
+The 2026-11-08 candidate passed **588 JVM tests** (29 core and 559 Android JVM), four native capsule layout tests, the debug build and lint (zero errors, 366 warnings). Huawei Android 12 device checks covered task migration, background capture and accessibility clicks, paused instructions and a complete calculator task. See the [validation report and limitations](docs/capsule-background-validation-20261108.md).
 
 Observed QQ checks covered reading visible conversation names, opening a named target, and finding and clicking it after a person scrolled it to a different position in the same list. The agent used text observations without screenshot tool calls on these successful paths and sent no chat messages. A choice-panel theme crash was fixed; the same-device choice, overlay minimize/expand and continuation path then passed.
 

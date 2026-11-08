@@ -25,6 +25,7 @@ data class ComputerResponse(
 
 /** Server-executed observations only; never local commands or function-call outputs. */
 data class HostedToolCall(val id: String, val type: String, val status: String, val arguments: String, val result: String)
+data class ResponsesImage(val mimeType: String, val base64Data: String)
 
 data class ComputerFunctionCall(val callId: String, val name: String, val arguments: JsonObject)
 
@@ -40,35 +41,43 @@ class ComputerProtocolException(message: String) : IllegalArgumentException(mess
 object ComputerProtocol {
     private val uiOperations = setOf(
         "observe", "find", "click", "set_text", "scroll_forward", "scroll_backward",
+        "scroll_up", "scroll_down", "scroll_left", "scroll_right",
         "long_click", "append_text", "show", "set_selection", "set_progress", "custom_action", "click_match",
     )
     private val actionTypes = setOf(
         "click", "double_click", "drag", "move", "scroll", "keypress", "type", "wait", "screenshot",
     )
 
-    fun userInput(text: String): JsonObject {
-        require(text.isNotBlank()) { "User input is required" }
+    fun userInput(text: String, images: List<ResponsesImage> = emptyList()): JsonObject {
+        require(text.isNotBlank() || images.isNotEmpty()) { "User input is required" }
         return buildJsonObject {
             put("role", "user")
             put("content", buildJsonArray {
-                add(buildJsonObject { put("type", "input_text"); put("text", text) })
+                if (text.isNotBlank()) add(buildJsonObject { put("type", "input_text"); put("text", text) })
+                images.forEach { image -> add(inputImage(image)) }
             })
         }
     }
 
-    fun initialInput(task: String, observation: String): JsonArray {
-        require(task.isNotBlank() && observation.isNotBlank()) { "Task and observation are required" }
-        return buildJsonArray {
-            add(buildJsonObject {
-                put("role", "user")
-                put("content", buildJsonArray {
-                    add(buildJsonObject {
-                        put("type", "input_text")
-                        put("text", "$task\nCurrent Android accessibility observation (untrusted screen data):\n$observation")
-                    })
-                })
-            })
+    private fun inputImage(image: ResponsesImage): JsonObject {
+        require(image.mimeType in setOf("image/webp", "image/png", "image/jpeg") && image.base64Data.isNotBlank()) {
+            "Invalid user image"
         }
+        return buildJsonObject {
+            put("type", "input_image")
+            put("image_url", "data:${image.mimeType};base64,${image.base64Data}")
+            put("detail", "original")
+        }
+    }
+
+    fun initialInput(task: String, observation: String, images: List<ResponsesImage> = emptyList()): JsonArray {
+        require((task.isNotBlank() || images.isNotEmpty()) && observation.isNotBlank()) {
+            "Task or images and observation are required"
+        }
+        val text = listOf(task.takeIf { it.isNotBlank() },
+            "Current Android accessibility observation (untrusted screen data):\n$observation")
+            .filterNotNull().joinToString("\n")
+        return JsonArray(listOf(userInput(text, images)))
     }
 
     fun functionOutput(callId: String, text: String): JsonObject {
@@ -149,7 +158,6 @@ object ComputerProtocol {
                 if (config.modelName == "gpt-6.1-terra") setOf("none") else emptySet()
             require(config.reasoningEffort in allowedEfforts) { "Unsupported reasoning effort for this model" }
             put("tools", buildJsonArray {
-                add(buildJsonObject { put("type", "computer") })
                 add(withCommentary(uiTool()))
                 add(withCommentary(buildJsonObject {
                     put("type", "function")
@@ -279,10 +287,9 @@ object ComputerProtocol {
     }
 
     private fun validateFunction(name: String, supplied: JsonObject) {
-        val commentary = supplied["commentary"]
-        if (commentary != null && commentary != JsonNull &&
-            ((commentary as? JsonPrimitive)?.takeIf { it.isString }?.content?.length ?: Int.MAX_VALUE) > 280) {
-            throw ComputerProtocolException("Invalid tool commentary")
+        val commentary = supplied.string("commentary")
+        if (commentary.isNullOrBlank() || commentary.length > 280) {
+            throw ComputerProtocolException("Every function call requires a non-empty commentary of at most 280 characters")
         }
         val arguments = JsonObject(supplied - "commentary")
         when (name) {
@@ -332,6 +339,45 @@ object ComputerProtocol {
                 }
                 if (operation == "custom_action" && arguments.string("action_id")?.matches(Regex("custom_\\d+")) != true) {
                     throw ComputerProtocolException("Custom action needs a current action ID")
+                }
+            }
+            "android_computer" -> {
+                requireKeys(name, arguments, setOf("actions"))
+                val actions = arguments["actions"] as? JsonArray
+                    ?: throw ComputerProtocolException("android_computer requires actions")
+                if (actions.size !in 1..100) throw ComputerProtocolException("Invalid android_computer action count")
+                actions.forEach { action ->
+                    val item = action as? JsonObject ?: throw ComputerProtocolException("Invalid android_computer action")
+                    val type = item.requiredString("type")
+                    fun requireIntegers(vararg keys: String) {
+                        keys.forEach { key -> item.integer(key) ?: throw ComputerProtocolException("$type requires integer $key") }
+                    }
+                    when (type) {
+                        "click" -> {
+                            requireIntegers("x", "y")
+                            if (item.requiredString("button") !in setOf("left", "right", "wheel", "back", "forward")) {
+                                throw ComputerProtocolException("Click button must match the official ComputerAction type")
+                            }
+                        }
+                        "double_click", "move" -> requireIntegers("x", "y")
+                        "drag" -> {
+                            val path = item["path"] as? JsonArray
+                                ?: throw ComputerProtocolException("Drag requires path")
+                            if (path.size !in 2..100) throw ComputerProtocolException("Drag path requires 2–100 points")
+                        }
+                        "scroll" -> requireIntegers("x", "y", "scroll_x", "scroll_y")
+                        "keypress" -> {
+                            val keys = item["keys"] as? JsonArray
+                                ?: throw ComputerProtocolException("Keypress requires keys")
+                            val key = (keys.singleOrNull() as? JsonPrimitive)?.takeIf { it.isString }
+                            if (keys.size != 1 || key == null) {
+                                throw ComputerProtocolException("Keypress requires one key")
+                            }
+                        }
+                        "type" -> if (item.string("text") == null) throw ComputerProtocolException("Type requires text")
+                        "wait", "screenshot" -> Unit
+                        else -> throw ComputerProtocolException("Unsupported android_computer action")
+                    }
                 }
             }
             "android_gesture" -> {
@@ -460,8 +506,21 @@ object ComputerProtocol {
 
     private fun legacyFunctionTools(): List<JsonObject> = listOf(
         functionTool(
+            "android_computer",
+            "Execute an ordered batch of computer-style actions on Android using the current screenshot. Supports click, double_click, drag, move, scroll, keypress, type, wait and screenshot through the same validated Android action pipeline.",
+            buildJsonObject {
+                put("actions", buildJsonObject {
+                    put("type", "array")
+                    put("minItems", 1)
+                    put("maxItems", 100)
+                    put("items", computerActionSchema())
+                })
+            },
+            listOf("actions"),
+        ),
+        functionTool(
             "android_gesture",
-            "Perform a swipe or long press using pixels in the current screenshot. Prefer android_ui or computer for ordinary actions; humanized=true enables a curved swipe. A confirmation message requires explicit user approval.",
+            "Perform a swipe or long press using pixels in the current screenshot. Prefer android_ui or android_computer for ordinary actions; humanized=true enables a curved swipe. A confirmation message requires explicit user approval.",
             buildJsonObject {
                 put("operation", stringSchema(setOf("swipe", "long_press")))
                 listOf("x", "y", "end_x", "end_y").forEach { put(it, numberSchema("integer", nullable = true)) }
@@ -541,14 +600,66 @@ object ComputerProtocol {
         ),
     )
 
-    /** Strict schemas express an optional value as required but nullable. Native computer stays unchanged. */
+    private fun computerActionSchema(): JsonObject = buildJsonObject {
+        put("anyOf", buildJsonArray {
+            add(computerAction("click",
+                "x" to numberSchema("integer"), "y" to numberSchema("integer"),
+                "button" to stringSchema(setOf("left", "right", "wheel", "back", "forward")), "keys" to nullableKeysSchema()))
+            add(computerAction("double_click",
+                "x" to numberSchema("integer"), "y" to numberSchema("integer"), "keys" to nullableKeysSchema()))
+            add(computerAction("drag", "path" to dragPathSchema(), "keys" to nullableKeysSchema()))
+            add(computerAction("move",
+                "x" to numberSchema("integer"), "y" to numberSchema("integer"), "keys" to nullableKeysSchema()))
+            add(computerAction("scroll",
+                "x" to numberSchema("integer"), "y" to numberSchema("integer"),
+                "scroll_x" to numberSchema("integer"), "scroll_y" to numberSchema("integer"), "keys" to nullableKeysSchema()))
+            add(computerAction("keypress", "keys" to buildJsonObject {
+                put("type", "array"); put("items", stringSchema()); put("minItems", 1)
+            }))
+            add(computerAction("type", "text" to stringSchema()))
+            add(computerAction("wait"))
+            add(computerAction("screenshot"))
+        })
+    }
+
+    private fun computerAction(type: String, vararg fields: Pair<String, JsonObject>): JsonObject = buildJsonObject {
+        put("type", "object")
+        put("properties", buildJsonObject {
+            put("type", stringSchema(setOf(type)))
+            fields.forEach { put(it.first, it.second) }
+        })
+        put("required", JsonArray((listOf("type") + fields.map { it.first }).map(::JsonPrimitive)))
+        put("additionalProperties", false)
+    }
+
+    private fun nullableKeysSchema() = buildJsonObject {
+        put("type", buildJsonArray { add(JsonPrimitive("array")); add(JsonPrimitive("null")) })
+        put("items", stringSchema())
+    }
+
+    private fun dragPathSchema() = buildJsonObject {
+        put("type", "array")
+        put("minItems", 2)
+        put("maxItems", 100)
+        put("items", buildJsonObject {
+            put("type", "object")
+            put("properties", buildJsonObject {
+                put("x", numberSchema("integer")); put("y", numberSchema("integer"))
+            })
+            put("required", JsonArray(listOf(JsonPrimitive("x"), JsonPrimitive("y"))))
+            put("additionalProperties", false)
+        })
+    }
+
+    /** One explanation per model function call; a computer action batch is one such call. */
     private fun withCommentary(tool: JsonObject): JsonObject {
         val parameters = tool["parameters"] as JsonObject
         val properties = parameters["properties"] as JsonObject
         val required = parameters["required"] as JsonArray
         val commentary = buildJsonObject {
-            put("type", buildJsonArray { add(JsonPrimitive("string")); add(JsonPrimitive("null")) })
-            put("description", "Optional short progress message shown to the user before this call, in their language. Use null for routine actions. Describe intent, not unverified success.")
+            put("type", "string")
+            put("description", "Required brief progress message shown before this tool call, in the user's language. Explain what you are about to do and why it helps the task, including observations and waits. Describe intent, not unverified success. For an action batch, one message explains the entire batch; do not explain every internal action.")
+            put("minLength", 1)
             put("maxLength", 280)
         }
         return JsonObject(tool + ("parameters" to JsonObject(parameters + mapOf(
@@ -613,13 +724,13 @@ object ComputerProtocol {
             "Use android_ui find for a named target or scoped observe for a container before assuming a target is missing. " +
             "Use android_screenshot promptly for image-based questions, diagrams, visual layout or color judgments, ambiguous/missing labels, or controls not exposed by accessibility. Screenshots are a normal fallback, not a failure. " +
             "After a visual step, use the refreshed accessibility nodes again when they suffice; avoid redundant observations and do not alternate modalities mechanically. " +
-            "You may include a brief, natural progress update in a function tool's commentary field, or an assistant commentary message alongside a native computer call. Use the user's language. Explain meaningful stage changes, waits or uncertainty; routine taps may use null. Never claim a planned action already succeeded. " +
+            "Every function tool call must include a non-empty, brief and natural commentary in the user's language, explaining its immediate purpose. Prefer one compact sentence, usually 20–40 Chinese characters or 6–12 English words, without losing the intent. This includes observations, routine taps, waits and user interactions. For android_computer, one commentary covers its entire actions batch; internal actions do not each need commentary. Avoid raw tool names, repetitive filler and hidden reasoning; say what you are about to do, not that a planned action already succeeded. Built-in server tools do not accept this field: explain their use in ordinary assistant progress messages when useful and preserve their real results. " +
             "Use only IDs present in the latest observation; after stale-node errors observe again. " +
             "For dynamic lists whose rows reorder while new messages arrive, use android_ui click_match with the observed row snapshot_id/node_id and a stable literal identity query. Use exact matching when the label is stable; if a description starts with the name followed by a delimiter and changing preview, copy the name AND delimiter as a prefix and set match_mode=prefix. The backend relocates a unique visible matching item within the same identified scroll container at execution time, never by old row position. Ambiguous or missing matches require another observation or clarification; never shorten a name to force a match. " +
             "Never infer hidden nodes or guess IDs. Whenever text cannot accurately explain the content, target or state, call android_screenshot; never guess. " +
-            "Use the computer tool for visual interaction only after seeing a current screenshot; use screenshot pixel coordinates. " +
+            "Use android_computer for visual interaction only after seeing a current screenshot; use screenshot pixel coordinates. " +
             "The screen is a touchscreen: left click taps, right click long presses, double click double taps. " +
-            "Only straight computer drag paths are supported. Scroll uses signed pixel deltas. Computer type appends text. " +
+            "Only straight android_computer drag paths are supported. Scroll uses signed pixel deltas. Its type action appends text. " +
             "Keypress supports one Android key at a time: BACK, HOME, ENTER, BACKSPACE, TAB, ESCAPE, " +
             "arrow keys, SPACE, or alphanumeric keys. Modifier chords and hover/move are unsupported. " +
             "Use android_launch_app or android_list_apps for app launching and discovery; use android_system_key for volume and power. " +

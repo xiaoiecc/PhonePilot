@@ -4,31 +4,18 @@ import android.graphics.Bitmap
 import android.os.Build
 import java.io.ByteArrayOutputStream
 
-internal enum class ScreenshotCodec { PNG, WEBP_LOSSLESS }
-
-/** Preserve the scaled UI pixels; do not trade text edges for a smaller lossy image. */
 internal object ScreenshotCompression {
-    fun encode(bitmap: Bitmap, originalPng: ByteArray? = null): ByteArray = select(Build.VERSION.SDK_INT) { codec ->
-        if (codec == ScreenshotCodec.PNG && originalPng != null) return@select originalPng
-        val format = when (codec) {
-            ScreenshotCodec.PNG -> Bitmap.CompressFormat.PNG
-            ScreenshotCodec.WEBP_LOSSLESS -> if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                Bitmap.CompressFormat.WEBP_LOSSLESS
-            } else Bitmap.CompressFormat.PNG
+    fun encode(bitmap: Bitmap): ByteArray {
+        val format = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            Bitmap.CompressFormat.WEBP_LOSSLESS
+        } else {
+            @Suppress("DEPRECATION")
+            Bitmap.CompressFormat.WEBP
         }
-        ByteArrayOutputStream().use { output ->
-            // For lossless WebP this controls compression effort, not visual quality.
-            if (bitmap.compress(format, 50, output)) output.toByteArray() else null
+        val encoded = ByteArrayOutputStream().use { output ->
+            if (bitmap.compress(format, 100, output)) output.toByteArray() else null
         }
-    }
-
-    internal fun select(sdkInt: Int, encode: (ScreenshotCodec) -> ByteArray?): ByteArray {
-        val codecs = if (sdkInt >= 30) listOf(ScreenshotCodec.WEBP_LOSSLESS, ScreenshotCodec.PNG)
-            else listOf(ScreenshotCodec.PNG)
-        val candidates = codecs.mapNotNull { codec ->
-            try { encode(codec)?.takeIf { it.isNotEmpty() } } catch (_: Exception) { null }
-        }
-        return checkNotNull(candidates.minByOrNull { it.size }) { "Unable to encode screenshot losslessly" }
+        return checkNotNull(encoded?.takeIf { it.isNotEmpty() }) { "Unable to encode screenshot as WebP" }
     }
 
     fun extensionFor(bytes: ByteArray): String = when {

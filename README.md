@@ -6,15 +6,25 @@ PhonePilot 是该项目的直接二次开发版本，继承其 Android 原生应
 
 中文 | [English](README_en.md) · [与上游的具体差异](docs/changes-from-upstream.md)
 
+## 下载当前版本
+
+[下载 1.0.3 自编译 APK](https://github.com/xiaoiecc/PhonePilot/releases/download/v1.0.3/PhonePilot-1.0.3-capsule-background-candidate.apk) · [发布说明](https://github.com/xiaoiecc/PhonePilot/releases/tag/v1.0.3)
+
+此包为本地编译并实测的 Debug 签名候选版，不含 API Key 或代理订阅。覆盖安装要求签名一致。后台能力当前仅启用实测的 Android 12 / API 31 档案，其他版本可继续使用前台操控。
+
 ## 主要改进
 
-- **原生工具调用与批量操作**：从旧版文本动作解析转为 OpenAI Responses 原生 `computer` 与 Android function tools，支持有序批次操作、结果回传与执行前检查。
+- **全新悬浮胶囊**：持续显示最新进度，两行摘要可展开全文；暂停、提问和人工协作时动画展开输入区，输入随文字增高至六行，发送后继续同一会话。后台运行仍同步更新胶囊。
+- **同任务前后台切换**：通过 Shizuku 虚拟显示屏迁移当前应用任务，支持后台截图、坐标与无障碍操作，点击后台胶囊可回前台。仅 API 31 能力档案已启用；不承诺所有应用跳转或后台中文输入均兼容。
+
+- **原生工具调用与批量操作**：从旧版文本动作解析转为 OpenAI Responses function tools，以 `android_computer` 提供电脑操作动作接口，支持有序批次、结果回传与执行前检查。
+- **聊天与多图附件**：普通问答和云端搜索/代码执行留在 Chat；手机工具调用时才进入浮窗。原生图库支持多选，按顺序压缩发送和保存，不额外限制为四张。
 - **无障碍文字观察与精确操作**：读取精简语义树、本地查找、节点点击、文字输入和滚动；文字可靠时减少截图上传，需要视觉信息时补充截图。普通点击验证观察身份，不盲用失效节点。
 - **动态列表按名称重新定位**：显式 `android_ui.click_match` 在同一、可唯一识别的滚动容器内，按已观察的字面条件重新定位目标。支持精确匹配或带分隔符的显式前缀匹配；原观察和当前列表均须唯一，缺失或歧义时不点击。
 - **连续对话与会话列表**：任务完成后保留上下文，主页和浮窗均可继续交流，也可明确开启新会话。运行中可补充要求，在安全检查点处理；草稿暂停与手动暂停分别管理。
-- **可见反馈与人工协作**：可选展示模型提供的 commentary，显示输入/输出 token 计数；统一支持文字提问、选项回复、确认和人工接管。
+- **可见反馈与人工协作**：每次本地工具调用提供中途说明（批次共用一句），持续显示最新说明，显示输入/输出 token 计数；统一支持文字提问、选项回复、确认和人工接管。
 - **更完整的历史和导出**：按会话聚合多轮执行，展示消息、工具参数、结果、错误、耗时和状态；区分操作前后图片，并用真实完成的动作标注操作前图，支持分页导出。旧记录缺失的信息不伪造。
-- **截图按需获取与尺寸控制**：按实际发送的图片尺寸映射坐标，支持缩放和无损编码。缩放会改变分辨率，“无损”指编码方式；不承诺固定 token 或费用节省比例。
+- **截图按需获取与尺寸控制**：按实际发送的图片尺寸映射坐标，单次 WebP 编码；Android 10 起使用无损模式，旧平台使用质量 100 的 WebP。缩放会改变分辨率；不承诺固定 token 或费用节省比例。
 - **应用内代理订阅与节点选择**：导入受支持的 Clash/Mihomo YAML 订阅并选择节点；独立 Mihomo 进程只为本应用提供本地代理，不接管手机全局 VPN。
 
 ## OpenAI 官方 API 支持
@@ -75,13 +85,13 @@ pwsh -NoLogo -NoProfile -File ./scripts/fetch-mihomo.ps1
 sh ./gradlew :automation-core:test :app:testDebugUnitTest :app:assembleDebug :app:lintDebug
 ```
 
-Debug APK 位于 `app/build/outputs/apk/debug/`。应用名为 PhonePilot；包名仍是 `com.kevinluo.autoglm`，当前版本 `1.0.2` / `102`，部分产物文件名沿用 AutoGLM。覆盖安装还要求签名一致；自行构建不自动获得已有安装的签名。正式发布需配置自己的签名，切勿提交签名私钥。
+Debug APK 位于 `app/build/outputs/apk/debug/`。应用名为 PhonePilot；包名仍是 `com.kevinluo.autoglm`，当前版本 `1.0.3` / `103`，部分产物文件名沿用 AutoGLM。覆盖安装还要求签名一致；自行构建不自动获得已有安装的签名。正式发布需配置自己的签名，切勿提交签名私钥。
 
 开发约束见 [AGENTS.md](AGENTS.md) 和 [架构契约](docs/architecture-contract.md)。`:automation-core` 为纯 Kotlin/JVM 模块，Android 能力留在应用层。
 
 ## 已验证范围
 
-2026-11-07 的记录为 **509 项自动化测试通过**（核心 19 项、Android JVM 490 项），Debug 构建与 lint 通过；lint 仍有警告。这是具体代码快照的验证结果，不代表所有设备或应用均已通过。
+2026-11-08 的当前候选版通过 **588 项 JVM 测试**（核心 29 项、Android JVM 559 项）、4 项原生胶囊布局测试、Debug 构建和 lint（0 错误、366 警告）。Huawei Android 12 已实测同任务双向迁移、后台截图及无障碍点击、暂停补充指令和完整计算器任务。详见 [本版验证记录与限制](docs/capsule-background-validation-20261108.md)。
 
 QQ 实机验证覆盖读取可见会话名称、按名称打开目标，以及人工滚动改变位置后在同一列表中定位并点击。Agent 在这些成功路径中使用文字观察，没有调用截图工具，也没有发送聊天消息。选择面板的主题崩溃已修复，同路径选择、浮窗最小化/展开和任务继续已观察通过。
 

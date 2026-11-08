@@ -17,7 +17,10 @@ sealed interface UiCommand {
 enum class SemanticMatchMode { EXACT, PREFIX }
 
 sealed interface NodeAction {
-    enum class Simple : NodeAction { CLICK, LONG_CLICK, SCROLL_FORWARD, SCROLL_BACKWARD, SHOW }
+    enum class Simple : NodeAction {
+        CLICK, LONG_CLICK, SCROLL_FORWARD, SCROLL_BACKWARD,
+        SCROLL_UP, SCROLL_DOWN, SCROLL_LEFT, SCROLL_RIGHT, SHOW,
+    }
     data class Text(val value: String, val append: Boolean) : NodeAction
     data class Selection(val start: Int, val end: Int) : NodeAction
     data class Progress(val value: Float) : NodeAction

@@ -3,7 +3,10 @@ package com.kevinluo.autoglm
 import com.kevinluo.autoglm.util.Logger
 import com.kevinluo.autoglm.util.BoundedProcessRunner
 import android.os.Build
+import android.os.Binder
 import com.kevinluo.autoglm.device.CommandResultParcel
+import com.kevinluo.autoglm.device.DisplayResultParcel
+import com.kevinluo.autoglm.display.PrivilegedDisplaySession
 
 /**
  * User service for executing shell commands with elevated privileges.
@@ -13,11 +16,32 @@ class UserService : IUserService.Stub() {
     private val commandRunner = BoundedProcessRunner(forceDestroy = { process ->
         if (Build.VERSION.SDK_INT >= 26) process.destroyForcibly() else process.destroy()
     })
+    private val displays = PrivilegedDisplaySession { argv, timeout, limit -> executeArgs(argv, timeout, limit) }
+
+    override fun attachDisplay(runId: String): DisplayResultParcel = privileged { displays.attach(runId) }
+    override fun switchDisplay(runId: String, generation: Long, background: Boolean): DisplayResultParcel =
+        privileged { displays.switch(runId, generation, background) }
+    override fun inspectDisplay(runId: String, generation: Long): DisplayResultParcel = privileged { displays.inspect(runId, generation) }
+    override fun closeDisplay(runId: String, generation: Long): DisplayResultParcel = privileged { displays.close(runId, generation) }
+    override fun captureDisplay(runId: String, generation: Long, imageId: String): DisplayResultParcel =
+        privileged { displays.capture(runId, generation, imageId) }
+    override fun inputDisplay(runId: String, generation: Long, operation: Int, values: IntArray): CommandResultParcel =
+        privileged { displays.input(runId, generation, operation, values) }
+    override fun launchOnDisplay(runId: String, generation: Long, component: String): CommandResultParcel =
+        privileged { displays.launch(runId, generation, component) }
+    private inline fun <T> privileged(block: () -> T): T {
+        val identity = Binder.clearCallingIdentity()
+        return try { block() } finally { Binder.restoreCallingIdentity(identity) }
+    }
     /**
      * Destroys the service and exits the process.
      */
     override fun destroy() {
         Logger.i(TAG, "destroy")
+        if (!displays.shutdown()) {
+            Logger.w(TAG, "Display tasks could not be handed back; preserving the service for recovery")
+            return
+        }
         System.exit(0)
     }
 

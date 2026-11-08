@@ -18,6 +18,17 @@ class AndroidComputerDriverWaitTest {
     }
 
     @Test
+    fun `type preserves the actual keyboard gateway failure`() {
+        val input = mockk<TextInputManager>()
+        io.mockk.coEvery { input.appendText("abc") } returns com.kevinluo.autoglm.input.InputResult.failure("键盘未连接到输入框，未发送文字")
+        val driver = AndroidComputerDriver(mockk(), input)
+        val error = assertThrows<IllegalStateException> {
+            runBlocking { driver.execute(PreparedAction.Type("abc")) }
+        }
+        org.junit.jupiter.api.Assertions.assertEquals("键盘未连接到输入框，未发送文字", error.message)
+    }
+
+    @Test
     fun `computer wait cannot bypass the coordinator through the device driver`() {
         val driver = AndroidComputerDriver(
             mockk<DeviceExecutor>(), mockk<TextInputManager>(),

@@ -42,7 +42,7 @@ class AndroidComputerDriver(
                 is PreparedAction.Scroll -> Unit // Handled one primitive at a time above.
                 is PreparedAction.Type -> {
                     val result = textInputManager.appendText(action.text)
-                    check(result.success) { "文字输入失败，请检查 AutoGLM 键盘是否启用" }
+                    check(result.success) { result.message }
                 }
                 is PreparedAction.Key -> checkResult(deviceExecutor.pressKey(action.code))
                 PreparedAction.Wait -> Unit

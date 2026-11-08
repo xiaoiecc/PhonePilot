@@ -45,8 +45,15 @@ object ComputerActionMapper {
         return when (actionType) {
             "click" -> {
                 val button = action.string("button")
-                require(button == "left" || button == "right") { "Unsupported touchscreen button" }
-                PreparedAction.Tap(at(), longPress = button == "right")
+                require(button in setOf("left", "right", "wheel", "back", "forward")) { "Unsupported computer button" }
+                val target = at()
+                when (button) {
+                    "back" -> PreparedAction.Key(4)
+                    "forward" -> PreparedAction.Key(125) // KEYCODE_FORWARD; 6 is ENDCALL.
+                    "wheel" -> error("Middle mouse clicks are unsupported on a touchscreen")
+                    "right" -> PreparedAction.Tap(target, longPress = true)
+                    else -> PreparedAction.Tap(target)
+                }
             }
             "double_click" -> PreparedAction.Tap(at(), doubleTap = true)
             "drag" -> {

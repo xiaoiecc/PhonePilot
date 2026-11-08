@@ -36,6 +36,7 @@ data class HistoryMessage(
     val role: HistoryMessageRole,
     val text: String,
     val timestamp: Long = System.currentTimeMillis(),
+    val images: List<com.kevinluo.autoglm.core.ChatImage> = emptyList(),
 )
 
 enum class HistoryMessageRole { USER, AGENT }
